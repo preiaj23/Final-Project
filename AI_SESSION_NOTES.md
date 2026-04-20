@@ -2,7 +2,7 @@
 
 **Prompt:** The request was to merge the raw Excel datasets into one file with standardized variable names (without editing `Data/raw`), implement the pipeline in R under `scripts/`, write outputs to `data/cleaned`, add a string `DATASET_YEAR`, drop utilization/expenditure and survey-design variables per MEPS-style rules while updating the merged CSV in place, and document everything including a dropped-variable count and list.
 
-**Suggestion:** The approach was to row-bind yearly extracts after harmonizing names by stripping year suffixes and a small manual map, then drop excluded columns using prefix/pattern rules so merged column names stay aligned with the codebook intent, with audit CSVs for renames and drops.
+**Suggestion:** The approach was to row-bind yearly extracts after making the varibale names the same by stripping year suffixes and a small manual map, then drop excluded columns using prefix/pattern rules so merged column names stay aligned with the codebook intent, with audit CSVs for renames and drops.
 
 **Implementation:** The deliverables are `merge_raw_datasets.R`, which builds `merged_standardized_dataset.csv` and audits in `data/cleaned`, and `clean_datasets.R`, which adds `DATASET_YEAR`, drops 267 columns (1,733 → 1,466), overwrites the merged file, and writes `dropped_variables.csv`; details and the full drop list appear in `README.md`.
 
