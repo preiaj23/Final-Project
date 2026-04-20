@@ -12,3 +12,20 @@
 Rscript scripts/merge_raw_datasets.R
 Rscript scripts/clean_datasets.R
 ```
+
+# AI session notes (April 20, 2026) - Sasha
+
+**Prompt:** The request was to build a modeling workflow on the merged cleaned dataset using an 80/20 train-test split, train an intercept model, random forest, xgboost, and a piecewise polynomial approach with 5-fold CV, clip any negative predictions to zero, and choose the best model by RMSLE; then add package bootstrap support and document the update.
+
+**Suggestion:** The approach was to retain `TOTEXP` in the cleaned dataset as the modeling target, implement a single reproducible training script with shared clipping/RMSLE helpers, and add local `.Rlibs` bootstrap so modeling commands run without relying on system library writes.
+
+**Implementation:** The deliverables are an update to `clean_datasets.R` so `TOTEXP` is protected, a new `train_models.R` that trains and compares intercept/random forest/xgboost/piecewise spline models (forward selection + 5-fold CV), writes `model_rmsle_comparison.csv`, `model_test_predictions.csv`, and `piecewise_spline_selection.csv`, plus `Makefile` and `README.md` updates for `model`/`all` targets and bootstrap usage.
+
+**Authorship:** The R script and documentation changes were drafted by Cursor’s AI assistant on the user’s behalf, following the requested modeling constraints and evaluation criteria.
+
+```sh
+make all
+make model
+Rscript scripts/train_models.R
+```
+

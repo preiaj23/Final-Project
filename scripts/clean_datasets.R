@@ -11,14 +11,14 @@
 #    - Section 2.5.11: utilization and expenditures (charges, visits, payments
 #      by source) for totals, office, outpatient, ER, inpatient, dental, home
 #      health, other medical, and prescription blocks. Year suffixes 19–23 are
-#      already removed in merge, so names are base forms (e.g. TOTEXP, ERTOT).
+#      already removed in merge, so names are base forms (e.g. ERTOT).
 #      Aggregate variants in the merged file (ERT*, IPT*, OPT*, OBD*, OPS*, …)
 #      are dropped under the same rule.
 #    - Section 4.2: PERWTF, VARSTR, VARPSU; any column containing "BRR" or
 #      matching RWT + digits (replicate weights).
 #
 #    Protected (never dropped): DATA_YEAR, SOURCE_FILE, DATASET_YEAR, DUID,
-#    PID, DUPERSID, PANEL.
+#    PID, DUPERSID, PANEL, TOTEXP.
 #
 # Writes `data/cleaned/dropped_variables.csv`: one column `variable`, sorted.
 # ------------------------------------------------------------------------------
@@ -43,13 +43,14 @@ should_drop_column <- function(col) {
     "DUID",
     "PID",
     "DUPERSID",
-    "PANEL"
+    "PANEL",
+    "TOTEXP"
   )) {
     return(FALSE)
   }
 
   if (grepl(
-    "^(TOTTCH|TOTEXP|TOTSLF|TOTMCR|TOTMCD|TOTPRV|TOTVA|TOTTRI|TOTOFD|TOTSTL|TOTWCP|TOTOSR|TOTPTR|TOTOTH)$",
+    "^(TOTTCH|TOTSLF|TOTMCR|TOTMCD|TOTPRV|TOTVA|TOTTRI|TOTOFD|TOTSTL|TOTWCP|TOTOSR|TOTPTR|TOTOTH)$",
     col,
     perl = TRUE
   )) {

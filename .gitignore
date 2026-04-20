@@ -1,2 +1,6 @@
 Data/raw/*.xlsx
 Data/cleaned/merged_standardized_dataset.csv
+data/cleaned/model_rmsle_comparison.csv
+data/cleaned/model_test_predictions.csv
+data/cleaned/piecewise_spline_selection.csv
+.Rlibs

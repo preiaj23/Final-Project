@@ -30,6 +30,40 @@ Run it with:
 Rscript scripts/clean_datasets.R
 ```
 
+Note: `TOTEXP` is retained in the cleaned file for downstream modeling.
+
+## Modeling Script
+
+Use `scripts/train_models.R` after cleaning to train and compare:
+
+- intercept-only baseline
+- random forest
+- xgboost
+- piecewise polynomial smoothing-spline model with forward selection and 5-fold CV
+
+The script uses an 80/20 train-test split, clips negative predictions to zero for all models, and ranks models by RMSLE.
+
+Run it with:
+
+```sh
+Rscript scripts/train_models.R
+```
+
+Package bootstrap helper:
+
+- `train_models.R` auto-bootstraps required modeling packages (`randomForest`, `xgboost`) into local project library `.Rlibs`.
+- `make model` and `make all` automatically point `R_LIBS_USER` to that local `.Rlibs` path.
+
+Outputs written to `data/cleaned`:
+
+- `model_rmsle_comparison.csv`
+- `model_test_predictions.csv`
+- `piecewise_spline_selection.csv`
+
+## Session update (April 20, 2026)
+
+In this session we extended the pipeline from cleaning into modeling. We kept `TOTEXP` in the cleaned merged file as the prediction target, added `scripts/train_models.R`, and trained four models (intercept baseline, random forest, xgboost, and piecewise polynomial splines with forward selection + 5-fold CV) on an 80/20 train-test split. All model predictions are clipped at zero before RMSLE, outputs are written to `data/cleaned`, and the `Makefile` now includes `model` / `all` targets with local `.Rlibs` package bootstrap support.
+
 ### Latest run: columns dropped
 
 After the most recent run of `clean_datasets.R`:
