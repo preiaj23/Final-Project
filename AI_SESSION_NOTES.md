@@ -29,3 +29,17 @@ make model
 Rscript scripts/train_models.R
 ```
 
+# AI session notes (April 22, 2026) - Sophia
+
+**Prompt:** The request was to extend `scripts/clean_datasets.R` to apply MEPS data-dictionary processing (0/1 mapping, one-hot encoding for multiclass categoricals, and special handling for negative “missing” codes), then revise the approach to one-hot encode *all* non-ID, non-continuous variables while preserving negative values for continuous/amount variables.
+
+**Suggestion:** The approach was to keep continuous variables numeric (including negatives), map negative categorical codes to readable labels (`INAPPLICABLE`, `REFUSED`, etc.), and generate a new encoded output file plus a manifest so it’s easy to audit which source variables became which dummy columns. To avoid exploding the feature space, add a cardinality cap so very high-uniqueness numeric columns are kept as numeric pass-through rather than one-hot encoded.
+
+**Implementation:** `scripts/clean_datasets.R` now (1) still overwrites `data/cleaned/merged_standardized_dataset.csv` after dropping excluded variables, and (2) additionally writes `data/cleaned/merged_encoded_dataset.csv` and `data/cleaned/encoded_variable_manifest.csv`. All non-ID, non-continuous variables are treated as categorical and one-hot encoded (full-k) using either explicit MEPS label maps (`categorical_mapped`) or raw-code labels (`categorical_raw`). Any categorical column with more than `MAX_CATEGORICAL_CARDINALITY` (default 20) unique values is kept numeric and recorded as `high_cardinality_passthrough`.
+
+**Authorship:** The R script and documentation changes were drafted by Cursor’s AI assistant on the user’s behalf, following the MEPS mapping and encoding requirements described above.
+
+```sh
+Rscript scripts/clean_datasets.R
+```
+

@@ -32,6 +32,26 @@ Rscript scripts/clean_datasets.R
 
 Note: `TOTEXP` is retained in the cleaned file for downstream modeling.
 
+The cleaning script also writes an encoded companion file without modifying `merged_standardized_dataset.csv`:
+
+- `data/cleaned/merged_encoded_dataset.csv`: identifier columns first, then continuous variables (numeric, negatives preserved as losses), then full-one-hot dummies for every categorical and binary variable in the MEPS data dictionary.
+- `data/cleaned/encoded_variable_manifest.csv`: one row per source variable with its role (`id` / `continuous` / `categorical_mapped` / `categorical_raw` / `high_cardinality_passthrough`) and the list of output columns it produced. 
+
+Encoding rules:
+
+- Every kept column is classified as `id`, `continuous`, or `categorical` (the default). Any column that is not on the ID list and does not match the continuous patterns is treated as categorical.
+- Known multiclass / binary variables from the MEPS data dictionary (`REGION`, `MARRYX`, `HIDEG`, `RACETHX`, `INSCOP`, `EMPST##H`, `RTHLTH##`, `MNHLTH##`, `SEX`, `ASTHDX`, `ANYLMI`, `BORNUSA`, `HAVEUS##`, `FILEDR`) use friendly positive-code labels (`Northeast`, `Married`, `Yes`/`No`, etc.); manifest role = `categorical_mapped`.
+- All other categorical variables are auto-encoded using their raw integer codes as labels; manifest role = `categorical_raw`.
+- Negative codes on any categorical variable map to `INAPPLICABLE` (-1), `PREV_ROUND` (-2), `REFUSED` (-7), `DK` (-8), `TOP_CODED` (-10), `CANNOT_COMPUTE` (-15), with any other negative becoming `NEG_OTHER`. An extra `<VAR>_NA` indicator is added only when the column has `NA` values.
+- To keep the output manageable, any categorical column with more than `MAX_CATEGORICAL_CARDINALITY` (default 20) unique non-missing values is kept as a single numeric column instead of being one-hot encoded; manifest role = `high_cardinality_passthrough`.
+- Continuous variables (`AGEX`, `TTLPX`, `TOTEXP`, `ADBMI##`, `POVLEV`, `OBTOTV`, `FAMINC`) are coerced to numeric and keep negative values as-is.
+
+As a result, the only columns in `merged_encoded_dataset.csv` that are *not* 0/1 one-hot indicators are:
+
+- `id` columns (identifiers/keys like `DUPERSID`, file/year provenance fields, etc.)
+- `continuous` columns (numeric measures kept numeric, including negative values)
+- `high_cardinality_passthrough` columns (numeric columns with more than 20 unique values, including some weights and other high-uniqueness numeric variables)
+
 ## Modeling Script
 
 Use `scripts/train_models.R` after cleaning to train and compare:
