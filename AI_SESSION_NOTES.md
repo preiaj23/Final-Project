@@ -1,6 +1,6 @@
 # AI session notes (April 16, 2026) - Sophia
 
-**Prompt:** The request was to merge the raw Excel datasets into one file with standardized variable names (without editing `Data/raw`), implement the pipeline in R under `scripts/`, write outputs to `data/cleaned`, add a string `DATASET_YEAR`, drop utilization/expenditure and survey-design variables per MEPS-style rules while updating the merged CSV in place, and document everything including a dropped-variable count and list.
+**Prompt:** The request was to merge the raw Excel datasets into one file with standardized variable names (without editing `data/raw`), implement the pipeline in R under `scripts/`, write outputs to `data/cleaned`, add a string `DATASET_YEAR`, drop utilization/expenditure and survey-design variables per MEPS-style rules while updating the merged CSV in place, and document everything including a dropped-variable count and list.
 
 **Suggestion:** The approach was to row-bind yearly extracts after making the varibale names the same by stripping year suffixes and a small manual map, then drop excluded columns using prefix/pattern rules so merged column names stay aligned with the codebook intent, with audit CSVs for renames and drops.
 
@@ -41,5 +41,37 @@ Rscript scripts/train_models.R
 
 ```sh
 Rscript scripts/clean_datasets.R
+```
+
+# AI session notes (May 1, 2026) - Sasha
+
+**Prompt:** The request was to refactor the pipeline with a new `src` folder for shared paths and package downloads, update make commands, enforce the categorical one-hot threshold (`<= 20` categories) in training logic, add a `test_models` script that evaluates trained models on in-sample test data, create `output/models` and `output/metrics`, choose a best model by RMSLE with a coded path pointer, and document all changes.
+
+**Suggestion:** The approach was to centralize reusable path and package bootstrapping logic under `src/`, keep cleaning as the primary encoder, add defensive low-cardinality one-hot handling in `train_models.R`, persist trained model artifacts in `output/models`, and separate evaluation outputs in `output/metrics` so model comparison charting and best-model selection are explicit downstream artifacts.
+
+**Implementation:** Added `src/paths.R` and `src/download_packages.R`; updated `scripts/clean_datasets.R` and `scripts/train_models.R` to use shared paths and package bootstrap; `train_models.R` now writes split files (`data/splits/in_sample_train.csv`, `data/splits/in_sample_test.csv`), model artifacts (`output/models/*.rds`, `output/models/trained_model_bundle.rds`), and training metrics under `output/metrics/`. Added `scripts/test_models.R` to compute `rmsle`/`mse`/`rmse`/`mae` on in-sample test data, write `output/metrics/model_test_metrics.csv`, and save best-model path to `output/models/best_model_path.txt`. Updated `Makefile`, `.gitignore`, and `README.md` for the new workflow and paths.
+
+**Authorship:** The R scripts, build updates, and documentation updates were drafted by Cursor’s AI assistant on the user’s behalf, following the refactor and evaluation requirements above.
+
+```sh
+make clean
+make train
+make test
+make all
+```
+
+# AI session notes (May 1, 2026, performance + evaluation update) - Sasha
+
+**Prompt:** The request was to implement performance fixes for the refactored train/test pipeline and add an `evaluate_models` script that uses the selected best model to compute RMSLE on the future out-of-sample test path, then wire this into a `make evaluate` command including package/bootstrap and cleaning pipeline steps.
+
+**Suggestion:** The approach was to reduce large intermediate split writes by storing compact split artifacts (train indices and test-required columns only), then add a dedicated out-of-sample evaluation stage that reads `output/models/best_model_path.txt`, applies the correct model-specific preprocessing, and writes a single RMSLE summary artifact.
+
+**Implementation:** Updated `src/paths.R` split/metrics paths for compact artifacts, refactored `scripts/train_models.R` to write `data/splits/in_sample_train_indices.csv` and `data/splits/in_sample_test_compact.csv` instead of full split datasets, and added `scripts/evaluate_models.R` to score the chosen best model on `data/future/future_out_of_sample_test.csv` with RMSLE and write `output/metrics/out_of_sample_best_model_rmsle.csv`. Updated `Makefile` with a new `evaluate` target that runs package bootstrap, merge, clean, train, test, and evaluate in sequence. Updated `.gitignore` and `README.md` to reflect the new behavior and commands.
+
+**Authorship:** The performance refactor, new evaluation script, and documentation updates were drafted by Cursor’s AI assistant on the user’s behalf, following the requested pipeline behavior and evaluation requirements.
+
+```sh
+make evaluate
+Rscript scripts/evaluate_models.R
 ```
 

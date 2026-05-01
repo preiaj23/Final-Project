@@ -12,42 +12,6 @@ get_script_path <- function() {
   normalizePath(getwd(), mustWork = TRUE)
 }
 
-ensure_package <- function(package_name) {
-  if (!requireNamespace(package_name, quietly = TRUE)) {
-    stop(
-      sprintf(
-        "Package '%s' is required. Install it with install.packages('%s') and run the script again.",
-        package_name,
-        package_name
-      ),
-      call. = FALSE
-    )
-  }
-}
-
-bootstrap_packages <- function(package_names, lib_path) {
-  dir.create(lib_path, recursive = TRUE, showWarnings = FALSE)
-  .libPaths(c(lib_path, .libPaths()))
-
-  missing <- package_names[!vapply(package_names, requireNamespace, logical(1), quietly = TRUE)]
-
-  if (length(missing) > 0) {
-    message(sprintf("Installing missing packages into %s: %s", lib_path, paste(missing, collapse = ", ")))
-    utils::install.packages(missing, repos = "https://cloud.r-project.org", lib = lib_path)
-  }
-
-  still_missing <- package_names[!vapply(package_names, requireNamespace, logical(1), quietly = TRUE)]
-  if (length(still_missing) > 0) {
-    stop(
-      sprintf(
-        "Failed to install required package(s): %s. Install manually and retry.",
-        paste(still_missing, collapse = ", ")
-      ),
-      call. = FALSE
-    )
-  }
-}
-
 coerce_numeric <- function(x) {
   if (is.factor(x)) {
     x <- as.character(x)
@@ -111,6 +75,76 @@ clip_nonnegative <- function(pred) {
 rmsle <- function(actual, pred) {
   pred <- clip_nonnegative(pred)
   sqrt(mean((log1p(pred) - log1p(actual))^2))
+}
+
+sanitize_level <- function(level) {
+  out <- gsub("[^A-Za-z0-9]+", "_", level)
+  out <- gsub("^_+|_+$", "", out)
+  if (!nzchar(out)) {
+    out <- "blank"
+  }
+  out
+}
+
+enforce_low_cardinality_ohe <- function(df, exclude_columns, max_levels = 20L) {
+  transformed <- df
+  cols <- setdiff(names(transformed), exclude_columns)
+  encoded_sources <- character()
+
+  for (col in cols) {
+    x <- transformed[[col]]
+    if (!(is.character(x) || is.factor(x) || is.logical(x))) {
+      next
+    }
+
+    x_chr <- as.character(x)
+    levels <- sort(unique(x_chr[!is.na(x_chr)]))
+    if (length(levels) == 0) {
+      transformed[[col]] <- 0
+      next
+    }
+
+    if (length(levels) <= max_levels) {
+      for (lv in levels) {
+        encoded_name <- sprintf("%s_%s", col, sanitize_level(lv))
+        transformed[[encoded_name]] <- as.integer(!is.na(x_chr) & x_chr == lv)
+      }
+
+      if (any(is.na(x_chr))) {
+        transformed[[sprintf("%s_NA", col)]] <- as.integer(is.na(x_chr))
+      }
+
+      transformed[[col]] <- NULL
+      encoded_sources <- c(encoded_sources, col)
+    } else {
+      transformed[[col]] <- as.numeric(factor(x_chr, levels = levels))
+    }
+  }
+
+  list(data = transformed, encoded_sources = encoded_sources)
+}
+
+prepare_numeric_frame <- function(df, columns, medians = NULL) {
+  out <- data.frame(row.names = seq_len(nrow(df)))
+  if (is.null(medians)) {
+    medians <- stats::setNames(rep(NA_real_, length(columns)), columns)
+  }
+
+  for (nm in columns) {
+    vals <- coerce_numeric(df[[nm]])
+    med <- medians[[nm]]
+    if (!is.finite(med)) {
+      med <- suppressWarnings(stats::median(vals, na.rm = TRUE))
+      if (!is.finite(med)) {
+        med <- 0
+      }
+    }
+    vals[is.na(vals)] <- med
+    out[[nm]] <- vals
+    medians[[nm]] <- med
+  }
+
+  list(data = out, medians = medians)
 }
 
 cv_rmsle <- function(df, target_name, feature_names, degree, n_folds = 5L, seed = 2026L) {
@@ -182,12 +216,17 @@ forward_select_spline <- function(train_df, target_name, candidates, max_feature
 
 script_path <- get_script_path()
 project_root <- normalizePath(file.path(dirname(script_path), ".."), mustWork = TRUE)
-cleaned_dir <- file.path(project_root, "data", "cleaned")
-input_path <- file.path(cleaned_dir, "merged_standardized_dataset.csv")
-local_lib <- file.path(project_root, ".Rlibs")
+source(file.path(project_root, "src", "paths.R"))
+source(file.path(project_root, "src", "download_packages.R"))
 
-bootstrap_packages(c("randomForest", "xgboost"), local_lib)
-ensure_package("splines")
+paths <- build_project_paths(project_root)
+ensure_project_dirs(paths)
+bootstrap_model_packages(project_root)
+
+input_path <- paths$merged_encoded_dataset
+if (!file.exists(input_path)) {
+  input_path <- paths$merged_standardized_dataset
+}
 
 if (!file.exists(input_path)) {
   stop(
@@ -198,6 +237,7 @@ if (!file.exists(input_path)) {
 
 message(sprintf("Reading %s", input_path))
 dataset <- utils::read.csv(input_path, check.names = FALSE, stringsAsFactors = FALSE)
+names(dataset) <- sub("^[^.]+\\.", "", names(dataset))
 
 target_name <- "TOTEXP"
 if (!target_name %in% names(dataset)) {
@@ -222,6 +262,14 @@ exclude_columns <- c(
   "SOURCE_FILE",
   "DATASET_YEAR"
 )
+
+ohe_result <- enforce_low_cardinality_ohe(
+  df = dataset,
+  exclude_columns = exclude_columns,
+  max_levels = 20L
+)
+dataset <- ohe_result$data
+
 candidate_columns <- setdiff(names(dataset), exclude_columns)
 
 candidate_numeric <- candidate_columns[vapply(dataset[candidate_columns], function(x) {
@@ -262,15 +310,13 @@ top_features <- names(sort(cor_scores, decreasing = TRUE))[seq_len(min(80, lengt
 set.seed(2026)
 rf_rows <- sample.int(nrow(train_df), size = min(30000L, nrow(train_df)))
 rf_train <- train_df[rf_rows, c(top_features, target_name), drop = FALSE]
-for (nm in top_features) {
-  rf_train[[nm]] <- impute_with_median(rf_train[[nm]])
-}
-rf_test <- test_df[top_features]
-for (nm in top_features) {
-  rf_test[[nm]] <- impute_with_median(rf_test[[nm]], fallback = stats::median(rf_train[[nm]], na.rm = TRUE))
-}
+rf_train_prepped <- prepare_numeric_frame(rf_train, top_features)
+rf_train_features <- rf_train_prepped$data
+rf_medians <- rf_train_prepped$medians
+rf_test_prepped <- prepare_numeric_frame(test_df, top_features, medians = rf_medians)
+rf_test <- rf_test_prepped$data
 rf_fit <- randomForest::randomForest(
-  x = rf_train[top_features],
+  x = rf_train_features[top_features],
   y = rf_train[[target_name]],
   ntree = 400,
   mtry = max(1, floor(sqrt(length(top_features))))
@@ -310,13 +356,11 @@ spline_candidates <- names(sort(cor_scores, decreasing = TRUE))[seq_len(min(12, 
 set.seed(2028)
 spline_rows <- sample.int(nrow(train_df), size = min(15000L, nrow(train_df)))
 spline_train <- train_df[spline_rows, c(spline_candidates, target_name), drop = FALSE]
-for (nm in spline_candidates) {
-  spline_train[[nm]] <- impute_with_median(spline_train[[nm]])
-}
-spline_test <- test_df[spline_candidates]
-for (nm in spline_candidates) {
-  spline_test[[nm]] <- impute_with_median(spline_test[[nm]], fallback = stats::median(spline_train[[nm]], na.rm = TRUE))
-}
+spline_train_prepped <- prepare_numeric_frame(spline_train, spline_candidates)
+spline_train[spline_candidates] <- spline_train_prepped$data
+spline_medians <- spline_train_prepped$medians
+spline_test_prepped <- prepare_numeric_frame(test_df, spline_candidates, medians = spline_medians)
+spline_test <- spline_test_prepped$data
 
 spline_select <- forward_select_spline(
   train_df = spline_train,
@@ -343,6 +387,22 @@ spline_fit <- stats::lm(spline_formula, data = spline_train)
 pred_spline <- clip_nonnegative(stats::predict(spline_fit, newdata = spline_test))
 rmsle_spline <- rmsle(y_test, pred_spline)
 
+compact_test_columns <- unique(c(target_name, top_features, xgb_features, spline_select$selected))
+compact_test_columns <- compact_test_columns[compact_test_columns %in% names(test_df)]
+
+utils::write.csv(
+  data.frame(row_index = train_idx, stringsAsFactors = FALSE),
+  paths$in_sample_train_data,
+  row.names = FALSE,
+  na = ""
+)
+utils::write.csv(
+  test_df[, compact_test_columns, drop = FALSE],
+  paths$in_sample_test_data,
+  row.names = FALSE,
+  na = ""
+)
+
 comparison <- data.frame(
   model = c("intercept", "random_forest", "xgboost", "piecewise_polynomial_spline"),
   rmsle = c(rmsle_intercept, rmsle_rf, rmsle_xgb, rmsle_spline),
@@ -362,9 +422,9 @@ predictions <- data.frame(
   stringsAsFactors = FALSE
 )
 
-comparison_path <- file.path(cleaned_dir, "model_rmsle_comparison.csv")
-predictions_path <- file.path(cleaned_dir, "model_test_predictions.csv")
-spline_meta_path <- file.path(cleaned_dir, "piecewise_spline_selection.csv")
+comparison_path <- paths$train_metrics
+predictions_path <- paths$test_predictions
+spline_meta_path <- paths$spline_selection
 
 utils::write.csv(comparison, comparison_path, row.names = FALSE, na = "")
 utils::write.csv(predictions, predictions_path, row.names = FALSE, na = "")
@@ -380,9 +440,56 @@ utils::write.csv(
   na = ""
 )
 
+intercept_model_path <- file.path(paths$models_dir, "intercept_model.rds")
+rf_model_path <- file.path(paths$models_dir, "random_forest_model.rds")
+xgb_model_path <- file.path(paths$models_dir, "xgboost_model.rds")
+spline_model_path <- file.path(paths$models_dir, "piecewise_spline_model.rds")
+
+saveRDS(intercept_fit, intercept_model_path)
+saveRDS(rf_fit, rf_model_path)
+saveRDS(xgb_fit, xgb_model_path)
+saveRDS(spline_fit, spline_model_path)
+
+bundle <- list(
+  metadata = list(
+    target_name = target_name,
+    split_seed = 2026L,
+    one_hot_max_levels = 20L,
+    source_dataset = input_path,
+    encoded_in_training = ohe_result$encoded_sources
+  ),
+  models = list(
+    intercept = intercept_fit,
+    random_forest = rf_fit,
+    xgboost = xgb_fit,
+    piecewise_spline = spline_fit
+  ),
+  model_paths = list(
+    intercept = intercept_model_path,
+    random_forest = rf_model_path,
+    xgboost = xgb_model_path,
+    piecewise_spline = spline_model_path
+  ),
+  artifacts = list(
+    random_forest = list(features = top_features, medians = rf_medians),
+    xgboost = list(features = xgb_features, medians = xgb_train_build$medians),
+    piecewise_spline = list(
+      selected = spline_select$selected,
+      degree = spline_select$degree,
+      medians = spline_medians
+    )
+  ),
+  training_comparison = comparison
+)
+
+saveRDS(bundle, paths$model_bundle)
+
 message("")
 message("Model training complete.")
 message(sprintf("Best model: %s (RMSLE %.6f)", comparison$model[[1]], comparison$rmsle[[1]]))
 message(sprintf("Comparison file: %s", comparison_path))
 message(sprintf("Predictions file: %s", predictions_path))
 message(sprintf("Piecewise spline selection: %s", spline_meta_path))
+message(sprintf("In-sample train split: %s", paths$in_sample_train_data))
+message(sprintf("In-sample test split: %s", paths$in_sample_test_data))
+message(sprintf("Model bundle: %s", paths$model_bundle))

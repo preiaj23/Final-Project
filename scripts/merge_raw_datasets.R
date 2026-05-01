@@ -128,7 +128,7 @@ ensure_package("readxl")
 
 script_path <- get_script_path()
 project_root <- normalizePath(file.path(dirname(script_path), ".."), mustWork = TRUE)
-raw_dir <- file.path(project_root, "Data", "raw")
+raw_dir <- file.path(project_root, "data", "raw")
 output_dir <- file.path(project_root, "data", "cleaned")
 
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)

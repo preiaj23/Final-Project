@@ -2,7 +2,7 @@
 
 ## Data Merge Script
 
-Use `scripts/merge_raw_datasets.R` to read the Excel files in `Data/raw`, standardize inconsistent variable names, and combine them into one merged dataset without modifying the raw files.
+Use `scripts/merge_raw_datasets.R` to read the Excel files in `data/raw`, standardize inconsistent variable names, and combine them into one merged dataset without modifying the raw files.
 
 Run it with:
 
@@ -61,7 +61,7 @@ Use `scripts/train_models.R` after cleaning to train and compare:
 - xgboost
 - piecewise polynomial smoothing-spline model with forward selection and 5-fold CV
 
-The script uses an 80/20 train-test split, clips negative predictions to zero for all models, and ranks models by RMSLE.
+The script uses an 80/20 in-sample train-test split, clips negative predictions to zero for all models, and ranks models by RMSLE. It reads shared paths from `src/paths.R`, installs modeling dependencies from `src/download_packages.R`, and defensively one-hot encodes any remaining categorical variables that have 20 or fewer categories.
 
 Run it with:
 
@@ -69,16 +69,59 @@ Run it with:
 Rscript scripts/train_models.R
 ```
 
-Package bootstrap helper:
+## Test Models Script
 
-- `train_models.R` auto-bootstraps required modeling packages (`randomForest`, `xgboost`) into local project library `.Rlibs`.
-- `make model` and `make all` automatically point `R_LIBS_USER` to that local `.Rlibs` path.
+Use `scripts/test_models.R` after training to score all trained models on the in-sample test split and choose the best model by RMSLE.
 
-Outputs written to `data/cleaned`:
+Run it with:
 
-- `model_rmsle_comparison.csv`
-- `model_test_predictions.csv`
-- `piecewise_spline_selection.csv`
+```sh
+Rscript scripts/test_models.R
+```
+
+`test_models.R` writes per-model metrics (`rmsle`, `mse`, `rmse`, `mae`) to `output/metrics/model_test_metrics.csv` for bar-charting and writes the best-model file path to `output/models/best_model_path.txt`.
+
+Performance-focused output behavior:
+
+- `train_models.R` now writes compact split artifacts instead of full split datasets:
+  - `data/splits/in_sample_train_indices.csv` (row indices only)
+  - `data/splits/in_sample_test_compact.csv` (only columns required for model testing)
+- This avoids writing very large full-width train/test CSVs from the encoded dataset.
+
+## Evaluate Models Script
+
+Use `scripts/evaluate_models.R` after `test_models.R` to evaluate the selected best model on the future out-of-sample test path (`data/future/future_out_of_sample_test.csv`) using RMSLE.
+
+Run it with:
+
+```sh
+Rscript scripts/evaluate_models.R
+```
+
+Output:
+
+- `output/metrics/out_of_sample_best_model_rmsle.csv`: RMSLE of the selected best model on out-of-sample test data.
+
+## Shared src Utilities
+
+- `src/paths.R`: central path map for cleaned data, in-sample train/test split files, future out-of-sample path (`data/future/future_out_of_sample_test.csv`), and output artifact paths.
+- `src/download_packages.R`: centralized package bootstrap for modeling dependencies (`randomForest`, `xgboost`, `splines`) into `.Rlibs`.
+
+## Pipeline Commands
+
+```sh
+make clean      # merge + clean/encode
+make train      # train and persist models/artifacts
+make test       # evaluate trained models and select best by RMSLE
+make evaluate   # packages + merge + clean + train + test + out-of-sample RMSLE
+make all        # full pipeline: merge -> clean -> train -> test
+```
+
+Outputs are now split by purpose:
+
+- `output/models/`: model `.rds` files, `trained_model_bundle.rds`, and `best_model_path.txt`
+- `output/metrics/`: train comparison, test predictions, spline metadata, cross-model metric table, and out-of-sample best-model RMSLE
+- `data/splits/`: `in_sample_train_indices.csv` and `in_sample_test_compact.csv`
 
 ## Session update (April 20, 2026)
 
@@ -370,7 +413,7 @@ VARSTR
 
 Notes:
 
-- The raw Excel files in `Data/raw` are left unchanged.
+- The raw Excel files in `data/raw` are left unchanged.
 - Variables that are clearly the same across years are standardized to a common name in the merge step.
 - Variables that appear to be genuinely new in later years are kept as separate columns until dropped by the cleaning rules above.
 - Row count is unchanged by cleaning (`126003` rows); only columns are removed and `DATASET_YEAR` is set.

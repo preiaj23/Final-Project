@@ -35,6 +35,12 @@ get_script_path <- function() {
   normalizePath(getwd(), mustWork = TRUE)
 }
 
+script_path <- get_script_path()
+project_root <- normalizePath(file.path(dirname(script_path), ".."), mustWork = TRUE)
+source(file.path(project_root, "src", "paths.R"))
+paths <- build_project_paths(project_root)
+ensure_project_dirs(paths)
+
 NEG_CODES <- c(
   "-1"  = "INAPPLICABLE",
   "-2"  = "PREV_ROUND",
@@ -369,13 +375,10 @@ should_drop_column <- function(col) {
   FALSE
 }
 
-script_path <- get_script_path()
-project_root <- normalizePath(file.path(dirname(script_path), ".."), mustWork = TRUE)
-cleaned_dir <- file.path(project_root, "data", "cleaned")
-input_path <- file.path(cleaned_dir, "merged_standardized_dataset.csv")
-dropped_path <- file.path(cleaned_dir, "dropped_variables.csv")
-encoded_path <- file.path(cleaned_dir, "merged_encoded_dataset.csv")
-manifest_path <- file.path(cleaned_dir, "encoded_variable_manifest.csv")
+input_path <- paths$merged_standardized_dataset
+dropped_path <- paths$dropped_variables
+encoded_path <- paths$merged_encoded_dataset
+manifest_path <- paths$encoded_variable_manifest
 
 if (!file.exists(input_path)) {
   stop(
