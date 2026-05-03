@@ -31,6 +31,11 @@ rmsle <- function(actual, pred) {
   sqrt(mean((log1p(pred) - log1p(actual))^2))
 }
 
+rmse <- function(actual, pred) {
+  pred <- clip_nonnegative(pred)
+  sqrt(mean((actual - pred)^2))
+}
+
 prepare_numeric_frame <- function(df, columns, medians) {
   out <- data.frame(row.names = seq_len(nrow(df)))
   for (nm in columns) {
@@ -57,11 +62,14 @@ paths <- build_project_paths(project_root)
 ensure_project_dirs(paths)
 bootstrap_model_packages(project_root)
 
+cli_args <- commandArgs(trailingOnly = TRUE)
+force_xgboost <- length(cli_args) >= 1L && tolower(trimws(cli_args[[1]])) == "xgboost"
+
 if (!file.exists(paths$model_bundle)) {
   stop(sprintf("Model bundle not found at %s. Run training first.", paths$model_bundle), call. = FALSE)
 }
 
-if (!file.exists(paths$best_model_pointer)) {
+if (!force_xgboost && !file.exists(paths$best_model_pointer)) {
   stop(sprintf("Best model path file not found at %s. Run test_models first.", paths$best_model_pointer), call. = FALSE)
 }
 
@@ -86,22 +94,26 @@ if (any(!is.finite(actual) | actual < 0)) {
   stop("Out-of-sample target has invalid values; expected non-negative finite target.", call. = FALSE)
 }
 
-best_model_path <- trimws(readLines(paths$best_model_pointer, warn = FALSE)[1])
-if (!nzchar(best_model_path) || !file.exists(best_model_path)) {
-  stop("Best model path pointer is missing or points to a non-existent file.", call. = FALSE)
-}
+if (force_xgboost) {
+  best_model_key <- "xgboost"
+} else {
+  best_model_path <- trimws(readLines(paths$best_model_pointer, warn = FALSE)[1])
+  if (!nzchar(best_model_path) || !file.exists(best_model_path)) {
+    stop("Best model path pointer is missing or points to a non-existent file.", call. = FALSE)
+  }
 
-best_model_key <- switch(
-  basename(best_model_path),
-  "intercept_model.rds" = "intercept",
-  "random_forest_model.rds" = "random_forest",
-  "xgboost_model.rds" = "xgboost",
-  "piecewise_spline_model.rds" = "piecewise_polynomial_spline",
-  NA_character_
-)
+  best_model_key <- switch(
+    basename(best_model_path),
+    "intercept_model.rds" = "intercept",
+    "random_forest_model.rds" = "random_forest",
+    "xgboost_model.rds" = "xgboost",
+    "piecewise_spline_model.rds" = "piecewise_polynomial_spline",
+    NA_character_
+  )
 
-if (is.na(best_model_key)) {
-  stop(sprintf("Unrecognized best model file: %s", best_model_path), call. = FALSE)
+  if (is.na(best_model_key)) {
+    stop(sprintf("Unrecognized best model file: %s", best_model_path), call. = FALSE)
+  }
 }
 
 pred <- switch(
@@ -141,15 +153,18 @@ pred <- switch(
   }
 )
 
-score <- rmsle(actual, pred)
+score_rmsle <- rmsle(actual, pred)
+score_rmse <- rmse(actual, pred)
 result <- data.frame(
   model = best_model_key,
   evaluation_dataset = paths$future_out_of_sample_data,
-  rmsle = score,
+  rmsle = score_rmsle,
+  rmse = score_rmse,
   stringsAsFactors = FALSE
 )
 
 utils::write.csv(result, paths$evaluate_metrics, row.names = FALSE, na = "")
-message(sprintf("Out-of-sample RMSLE written to: %s", paths$evaluate_metrics))
-message(sprintf("Best model evaluated: %s", best_model_key))
-message(sprintf("RMSLE: %.6f", score))
+message(sprintf("Out-of-sample metrics written to: %s", paths$evaluate_metrics))
+message(sprintf("Model evaluated: %s", best_model_key))
+message(sprintf("RMSLE: %.6f", score_rmsle))
+message(sprintf("RMSE: %.6f", score_rmse))

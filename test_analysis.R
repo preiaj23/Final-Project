@@ -8,8 +8,11 @@
 # pass the encoded CSV path here.
 #
 # Usage:
-#   Rscript test_analysis.R                          # uses ./test.xlsx
+#   Rscript test_analysis.R                              # uses ./test.xlsx
 #   Rscript test_analysis.R path/to/encoded_test.csv
+#   Rscript test_analysis.R path/to/encoded_test.csv xgboost   # XGBoost only:
+#       requires only bundle XGBoost feature columns + TOTEXP (not RF/spline).
+#   For prediction-focused workflows see scripts/predict_xgboost_newdata.R
 #
 # How to improve RMSE (on a properly encoded test set):
 # - Retune / retrain: run `scripts/train_models.R` after adding data or features.
@@ -71,6 +74,7 @@ ensure_project_dirs(paths)
 bootstrap_model_packages(project_root)
 
 args <- commandArgs(trailingOnly = TRUE)
+xgboost_only <- length(args) >= 2L && tolower(trimws(args[[2]])) == "xgboost"
 data_path <- if (length(args) >= 1L) {
   normalizePath(args[[1]], mustWork = TRUE)
 } else {
@@ -107,12 +111,16 @@ if (!any(ok)) {
 test_df <- test_df[ok, , drop = FALSE]
 actual <- actual[ok]
 
-need_cols <- unique(c(
-  target_name,
-  bundle$artifacts$random_forest$features,
-  bundle$artifacts$xgboost$features,
-  bundle$artifacts$piecewise_spline$selected
-))
+need_cols <- if (xgboost_only) {
+  unique(c(target_name, bundle$artifacts$xgboost$features))
+} else {
+  unique(c(
+    target_name,
+    bundle$artifacts$random_forest$features,
+    bundle$artifacts$xgboost$features,
+    bundle$artifacts$piecewise_spline$selected
+  ))
+}
 missing <- setdiff(need_cols, names(test_df))
 if (length(missing) > 0) {
   stop(
@@ -121,21 +129,15 @@ if (length(missing) > 0) {
         "Test data is missing %d model columns (training used encoded/merged features).\n",
         "First ~20: %s\n",
         "Run your rows through the same clean/merge pipeline as training, then pass that CSV.\n",
-        "Raw MEPS-style Excel columns do not match one-hot feature names."
+        "Raw MEPS-style Excel columns do not match one-hot feature names.%s"
       ),
       length(missing),
-      paste(head(missing, 20), collapse = ", ")
+      paste(head(missing, 20), collapse = ", "),
+      if (xgboost_only) "" else "\nTip: append `xgboost` as a second argument to require only XGBoost features."
     ),
     call. = FALSE
   )
 }
-
-pred_intercept <- clip_nonnegative(stats::predict(bundle$models$intercept, newdata = test_df))
-
-rf_features <- bundle$artifacts$random_forest$features
-rf_medians <- bundle$artifacts$random_forest$medians
-rf_frame <- prepare_numeric_frame(test_df, rf_features, rf_medians)
-pred_rf <- clip_nonnegative(stats::predict(bundle$models$random_forest, newdata = rf_frame))
 
 xgb_features <- bundle$artifacts$xgboost$features
 xgb_medians <- bundle$artifacts$xgboost$medians
@@ -143,48 +145,68 @@ xgb_test <- prepare_numeric_frame(test_df, xgb_features, xgb_medians)
 dtest <- xgboost::xgb.DMatrix(data = as.matrix(xgb_test))
 pred_xgb <- clip_nonnegative(stats::predict(bundle$models$xgboost, newdata = dtest))
 
-spline_features <- bundle$artifacts$piecewise_spline$selected
-spline_degree <- bundle$artifacts$piecewise_spline$degree
-spline_medians <- bundle$artifacts$piecewise_spline$medians
-spline_test <- prepare_numeric_frame(test_df, spline_features, spline_medians)
-spline_rhs <- paste(
-  vapply(
-    spline_features,
-    function(nm) sprintf("splines::bs(%s, degree = %d, df = 5)", nm, spline_degree),
-    character(1)
-  ),
-  collapse = " + "
-)
-spline_formula <- stats::as.formula(sprintf("%s ~ %s", target_name, spline_rhs))
-spline_newdata <- cbind(spline_test, setNames(data.frame(actual), target_name))
-pred_spline <- clip_nonnegative(
-  stats::predict(bundle$models$piecewise_spline, newdata = spline_newdata)
-)
+if (xgboost_only) {
+  metrics <- data.frame(
+    model = "xgboost",
+    rmse = rmse(actual, pred_xgb),
+    rmsle = rmsle(actual, pred_xgb),
+    stringsAsFactors = FALSE
+  )
+  metrics$rank_rmse <- 1L
+} else {
+  pred_intercept <- clip_nonnegative(stats::predict(bundle$models$intercept, newdata = test_df))
 
-metrics <- data.frame(
-  model = c(
-    "intercept",
-    "random_forest",
-    "xgboost",
-    "piecewise_polynomial_spline"
-  ),
-  rmse = c(
-    rmse(actual, pred_intercept),
-    rmse(actual, pred_rf),
-    rmse(actual, pred_xgb),
-    rmse(actual, pred_spline)
-  ),
-  rmsle = c(
-    rmsle(actual, pred_intercept),
-    rmsle(actual, pred_rf),
-    rmsle(actual, pred_xgb),
-    rmsle(actual, pred_spline)
-  ),
-  stringsAsFactors = FALSE
-)
-metrics <- metrics[order(metrics$rmse), , drop = FALSE]
-metrics$rank_rmse <- seq_len(nrow(metrics))
+  rf_features <- bundle$artifacts$random_forest$features
+  rf_medians <- bundle$artifacts$random_forest$medians
+  rf_frame <- prepare_numeric_frame(test_df, rf_features, rf_medians)
+  pred_rf <- clip_nonnegative(stats::predict(bundle$models$random_forest, newdata = rf_frame))
+
+  spline_features <- bundle$artifacts$piecewise_spline$selected
+  spline_degree <- bundle$artifacts$piecewise_spline$degree
+  spline_medians <- bundle$artifacts$piecewise_spline$medians
+  spline_test <- prepare_numeric_frame(test_df, spline_features, spline_medians)
+  spline_rhs <- paste(
+    vapply(
+      spline_features,
+      function(nm) sprintf("splines::bs(%s, degree = %d, df = 5)", nm, spline_degree),
+      character(1)
+    ),
+    collapse = " + "
+  )
+  spline_formula <- stats::as.formula(sprintf("%s ~ %s", target_name, spline_rhs))
+  spline_newdata <- cbind(spline_test, setNames(data.frame(actual), target_name))
+  pred_spline <- clip_nonnegative(
+    stats::predict(bundle$models$piecewise_spline, newdata = spline_newdata)
+  )
+
+  metrics <- data.frame(
+    model = c(
+      "intercept",
+      "random_forest",
+      "xgboost",
+      "piecewise_polynomial_spline"
+    ),
+    rmse = c(
+      rmse(actual, pred_intercept),
+      rmse(actual, pred_rf),
+      rmse(actual, pred_xgb),
+      rmse(actual, pred_spline)
+    ),
+    rmsle = c(
+      rmsle(actual, pred_intercept),
+      rmsle(actual, pred_rf),
+      rmsle(actual, pred_xgb),
+      rmsle(actual, pred_spline)
+    ),
+    stringsAsFactors = FALSE
+  )
+  metrics <- metrics[order(metrics$rmse), , drop = FALSE]
+  metrics$rank_rmse <- seq_len(nrow(metrics))
+}
 
 message(sprintf("Rows evaluated: %d", length(actual)))
 message(sprintf("Data: %s", data_path))
+if (xgboost_only) {
+  message("Mode: XGBoost only (subset of columns).")
+}
 print(metrics)
