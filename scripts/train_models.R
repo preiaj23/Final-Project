@@ -77,6 +77,108 @@ rmsle <- function(actual, pred) {
   sqrt(mean((log1p(pred) - log1p(actual))^2))
 }
 
+rmse_raw <- function(actual, pred) {
+  sqrt(mean((actual - pred)^2))
+}
+
+xgb_best_tree_count <- function(fit) {
+  bi <- fit$best_iteration
+  if (!is.null(bi) && length(bi) == 1L && is.finite(bi) && bi >= 1L) {
+    return(as.integer(bi))
+  }
+  ni <- fit$niter
+  if (!is.null(ni) && length(ni) == 1L && is.finite(ni) && ni >= 1L) {
+    return(as.integer(ni))
+  }
+  1L
+}
+
+tune_xgboost_rmse <- function(
+  dsub,
+  dval,
+  y_val,
+  param_grid,
+  nrounds_max = 800L,
+  early_stopping_rounds = 35L,
+  seed = 2027L
+) {
+  results <- data.frame(
+    val_rmse = NA_real_,
+    best_nrounds = NA_integer_,
+    stringsAsFactors = FALSE
+  )
+
+  for (i in seq_len(nrow(param_grid))) {
+    set.seed(seed + i)
+    pg <- param_grid[i, , drop = FALSE]
+    params <- list(
+      objective = "reg:squarederror",
+      eval_metric = "rmse",
+      max_depth = as.integer(pg$max_depth),
+      eta = as.numeric(pg$eta),
+      min_child_weight = as.numeric(pg$min_child_weight),
+      subsample = as.numeric(pg$subsample),
+      colsample_bytree = as.numeric(pg$colsample_bytree)
+    )
+    if ("gamma" %in% names(pg)) {
+      params$gamma <- as.numeric(pg$gamma)
+    }
+    if ("reg_alpha" %in% names(pg)) {
+      params$reg_alpha <- as.numeric(pg$reg_alpha)
+    }
+    if ("reg_lambda" %in% names(pg)) {
+      params$reg_lambda <- as.numeric(pg$reg_lambda)
+    }
+
+    fit <- xgboost::xgb.train(
+      params = params,
+      data = dsub,
+      nrounds = nrounds_max,
+      watchlist = list(train = dsub, val = dval),
+      early_stopping_rounds = early_stopping_rounds,
+      verbose = 0
+    )
+
+    bi <- xgb_best_tree_count(fit)
+    pred <- stats::predict(fit, newdata = dval, iterationrange = c(1L, bi))
+    results$val_rmse[[i]] <- rmse_raw(y_val, clip_nonnegative(pred))
+    results$best_nrounds[[i]] <- bi
+  }
+
+  cbind(param_grid, results, row.names = NULL)
+}
+
+tune_random_forest_rmse <- function(
+  x_train,
+  y_train,
+  x_val,
+  y_val,
+  mtry_grid,
+  ntree = 400L,
+  seed = 2026L
+) {
+  best_rmse <- Inf
+  best_mtry <- mtry_grid[[1L]]
+
+  for (mtry in mtry_grid) {
+    set.seed(seed)
+    fit <- randomForest::randomForest(
+      x = x_train,
+      y = y_train,
+      ntree = ntree,
+      mtry = as.integer(mtry)
+    )
+    pred <- stats::predict(fit, newdata = x_val)
+    val_rmse <- rmse_raw(y_val, clip_nonnegative(pred))
+    if (val_rmse < best_rmse) {
+      best_rmse <- val_rmse
+      best_mtry <- as.integer(mtry)
+    }
+  }
+
+  list(val_rmse = best_rmse, mtry = best_mtry)
+}
+
 sanitize_level <- function(level) {
   out <- gsub("[^A-Za-z0-9]+", "_", level)
   out <- gsub("^_+|_+$", "", out)
@@ -315,40 +417,149 @@ rf_train_features <- rf_train_prepped$data
 rf_medians <- rf_train_prepped$medians
 rf_test_prepped <- prepare_numeric_frame(test_df, top_features, medians = rf_medians)
 rf_test <- rf_test_prepped$data
+
+p_rf <- length(top_features)
+mtry_grid <- unique(
+  pmin(
+    p_rf,
+    sort(
+      c(
+        1L,
+        max(1L, floor(sqrt(p_rf))),
+        max(1L, floor(p_rf / 3)),
+        max(1L, floor(p_rf / 2)),
+        p_rf
+      )
+    )
+  )
+)
+
+nv_rf <- nrow(rf_train_features)
+n_rf_val <- min(
+  max(50L, floor(0.2 * nv_rf)),
+  nv_rf - max(50L, floor(0.65 * nv_rf))
+)
+n_rf_val <- max(30L, n_rf_val)
+n_rf_val <- min(n_rf_val, nv_rf - 1L)
+set.seed(2026)
+rf_val_idx <- sample.int(nv_rf, size = n_rf_val)
+rf_sub_idx <- setdiff(seq_len(nv_rf), rf_val_idx)
+
+rf_tune <- tune_random_forest_rmse(
+  x_train = rf_train_features[rf_sub_idx, top_features, drop = FALSE],
+  y_train = rf_train[[target_name]][rf_sub_idx],
+  x_val = rf_train_features[rf_val_idx, top_features, drop = FALSE],
+  y_val = rf_train[[target_name]][rf_val_idx],
+  mtry_grid = mtry_grid,
+  ntree = 450L,
+  seed = 2026L
+)
+
+set.seed(2026)
 rf_fit <- randomForest::randomForest(
   x = rf_train_features[top_features],
   y = rf_train[[target_name]],
-  ntree = 400,
-  mtry = max(1, floor(sqrt(length(top_features))))
+  ntree = 500L,
+  mtry = rf_tune$mtry
 )
 pred_rf <- clip_nonnegative(stats::predict(rf_fit, newdata = rf_test))
 rmsle_rf <- rmsle(y_test, pred_rf)
 
-# xgboost
+# xgboost: validation RMSE grid search + early stopping, then refit on full xgb sample
 xgb_features <- names(sort(cor_scores, decreasing = TRUE))[seq_len(min(150, length(cor_scores)))]
 set.seed(2027)
 xgb_rows <- sample.int(nrow(train_df), size = min(50000L, nrow(train_df)))
 xgb_train_df <- train_df[xgb_rows, , drop = FALSE]
-xgb_train_y <- y_train[xgb_rows]
+xgb_train_y <- xgb_train_df[[target_name]]
 xgb_train_build <- build_feature_matrix(xgb_train_df, xgb_features)
 xgb_test_build <- build_feature_matrix(test_df, xgb_features, medians = xgb_train_build$medians)
-dtrain <- xgboost::xgb.DMatrix(data = xgb_train_build$matrix, label = xgb_train_y)
 dtest <- xgboost::xgb.DMatrix(data = xgb_test_build$matrix, label = y_test)
+
+val_frac <- 0.15
+n_xgb <- nrow(xgb_train_df)
+n_val <- max(50L, floor(val_frac * n_xgb))
+set.seed(2027)
+val_idx <- sample.int(n_xgb, size = n_val)
+sub_idx <- setdiff(seq_len(n_xgb), val_idx)
+if (length(sub_idx) < 100L) {
+  stop("XGBoost tuning split produced too few training rows.", call. = FALSE)
+}
+
+xgb_sub_df <- xgb_train_df[sub_idx, , drop = FALSE]
+xgb_val_df <- xgb_train_df[val_idx, , drop = FALSE]
+dsub <- xgboost::xgb.DMatrix(
+  data = build_feature_matrix(xgb_sub_df, xgb_features, medians = xgb_train_build$medians)$matrix,
+  label = xgb_sub_df[[target_name]]
+)
+dval <- xgboost::xgb.DMatrix(
+  data = build_feature_matrix(xgb_val_df, xgb_features, medians = xgb_train_build$medians)$matrix,
+  label = xgb_val_df[[target_name]]
+)
+dfull <- xgboost::xgb.DMatrix(data = xgb_train_build$matrix, label = xgb_train_y)
+
+xgb_param_space <- expand.grid(
+  max_depth = c(4L, 5L, 6L, 7L, 8L, 10L),
+  eta = c(0.02, 0.03, 0.05, 0.07, 0.1),
+  min_child_weight = c(1, 2, 3, 5, 7, 10),
+  subsample = c(0.65, 0.75, 0.85, 0.95, 1),
+  colsample_bytree = c(0.65, 0.75, 0.85, 0.95, 1),
+  gamma = c(0, 0.1, 0.5),
+  reg_alpha = c(0, 0.01, 0.1),
+  reg_lambda = c(1, 5, 10),
+  stringsAsFactors = FALSE
+)
+set.seed(2028L)
+n_xgb_tune <- min(55L, nrow(xgb_param_space))
+xgb_param_grid <- xgb_param_space[sample.int(nrow(xgb_param_space), n_xgb_tune), , drop = FALSE]
+rownames(xgb_param_grid) <- NULL
+
+xgb_tune_results <- tune_xgboost_rmse(
+  dsub = dsub,
+  dval = dval,
+  y_val = xgb_val_df[[target_name]],
+  param_grid = xgb_param_grid,
+  nrounds_max = 1500L,
+  early_stopping_rounds = 50L,
+  seed = 2027L
+)
+xgb_tune_results <- xgb_tune_results[order(xgb_tune_results$val_rmse), , drop = FALSE]
+xgb_tune_results$rank <- seq_len(nrow(xgb_tune_results))
+xgb_tune_path <- file.path(paths$metrics_dir, "xgboost_hyperparameter_tune.csv")
+utils::write.csv(xgb_tune_results, xgb_tune_path, row.names = FALSE, na = "")
+
+best_xgb_row <- xgb_tune_results[1, , drop = FALSE]
+xgb_final_params <- list(
+  objective = "reg:squarederror",
+  eval_metric = "rmse",
+  max_depth = as.integer(best_xgb_row$max_depth),
+  eta = as.numeric(best_xgb_row$eta),
+  min_child_weight = as.numeric(best_xgb_row$min_child_weight),
+  subsample = as.numeric(best_xgb_row$subsample),
+  colsample_bytree = as.numeric(best_xgb_row$colsample_bytree)
+)
+if ("gamma" %in% names(best_xgb_row)) {
+  xgb_final_params$gamma <- as.numeric(best_xgb_row$gamma)
+}
+if ("reg_alpha" %in% names(best_xgb_row)) {
+  xgb_final_params$reg_alpha <- as.numeric(best_xgb_row$reg_alpha)
+}
+if ("reg_lambda" %in% names(best_xgb_row)) {
+  xgb_final_params$reg_lambda <- as.numeric(best_xgb_row$reg_lambda)
+}
+set.seed(2027)
 xgb_fit <- xgboost::xgb.train(
-  params = list(
-    objective = "reg:squarederror",
-    eval_metric = "rmse",
-    eta = 0.05,
-    max_depth = 6,
-    subsample = 0.8,
-    colsample_bytree = 0.8
-  ),
-  data = dtrain,
-  nrounds = 150,
-  watchlist = list(train = dtrain, test = dtest),
+  params = xgb_final_params,
+  data = dfull,
+  nrounds = as.integer(best_xgb_row$best_nrounds),
   verbose = 0
 )
-pred_xgb <- clip_nonnegative(stats::predict(xgb_fit, newdata = dtest))
+pred_xgb <- clip_nonnegative(
+  stats::predict(
+    xgb_fit,
+    newdata = dtest,
+    iterationrange = c(1L, xgb_best_tree_count(xgb_fit))
+  )
+)
 rmsle_xgb <- rmsle(y_test, pred_xgb)
 
 # Piecewise polynomial with smoothing splines and 5-fold CV
@@ -406,11 +617,17 @@ utils::write.csv(
 comparison <- data.frame(
   model = c("intercept", "random_forest", "xgboost", "piecewise_polynomial_spline"),
   rmsle = c(rmsle_intercept, rmsle_rf, rmsle_xgb, rmsle_spline),
+  rmse = c(
+    rmse_raw(y_test, pred_intercept),
+    rmse_raw(y_test, pred_rf),
+    rmse_raw(y_test, pred_xgb),
+    rmse_raw(y_test, pred_spline)
+  ),
   stringsAsFactors = FALSE
 )
 comparison <- comparison[order(comparison$rmsle), , drop = FALSE]
 comparison$rank <- seq_len(nrow(comparison))
-comparison <- comparison[, c("rank", "model", "rmsle")]
+comparison <- comparison[, c("rank", "model", "rmsle", "rmse")]
 
 predictions <- data.frame(
   row_index = as.integer(rownames(test_df)),
@@ -471,8 +688,28 @@ bundle <- list(
     piecewise_spline = spline_model_path
   ),
   artifacts = list(
-    random_forest = list(features = top_features, medians = rf_medians),
-    xgboost = list(features = xgb_features, medians = xgb_train_build$medians),
+    random_forest = list(
+      features = top_features,
+      medians = rf_medians,
+      tuning = list(val_rmse = rf_tune$val_rmse, mtry = rf_tune$mtry)
+    ),
+    xgboost = list(
+      features = xgb_features,
+      medians = xgb_train_build$medians,
+      tuning = list(
+        validation_rmse = as.numeric(best_xgb_row$val_rmse),
+        best_nrounds = as.integer(best_xgb_row$best_nrounds),
+        max_depth = as.integer(best_xgb_row$max_depth),
+        eta = as.numeric(best_xgb_row$eta),
+        min_child_weight = as.numeric(best_xgb_row$min_child_weight),
+        subsample = as.numeric(best_xgb_row$subsample),
+        colsample_bytree = as.numeric(best_xgb_row$colsample_bytree),
+        gamma = if ("gamma" %in% names(best_xgb_row)) as.numeric(best_xgb_row$gamma) else NA_real_,
+        reg_alpha = if ("reg_alpha" %in% names(best_xgb_row)) as.numeric(best_xgb_row$reg_alpha) else NA_real_,
+        reg_lambda = if ("reg_lambda" %in% names(best_xgb_row)) as.numeric(best_xgb_row$reg_lambda) else NA_real_,
+        tune_results_csv = xgb_tune_path
+      )
+    ),
     piecewise_spline = list(
       selected = spline_select$selected,
       degree = spline_select$degree,
@@ -487,9 +724,16 @@ saveRDS(bundle, paths$model_bundle)
 message("")
 message("Model training complete.")
 message(sprintf("Best model: %s (RMSLE %.6f)", comparison$model[[1]], comparison$rmsle[[1]]))
+best_rmse_row <- comparison[which.min(comparison$rmse), , drop = FALSE]
+message(sprintf(
+  "Lowest test RMSE: %s (RMSE %.6f)",
+  best_rmse_row$model[[1]],
+  best_rmse_row$rmse[[1]]
+))
 message(sprintf("Comparison file: %s", comparison_path))
 message(sprintf("Predictions file: %s", predictions_path))
 message(sprintf("Piecewise spline selection: %s", spline_meta_path))
+message(sprintf("XGBoost hyperparameter search: %s", xgb_tune_path))
 message(sprintf("In-sample train split: %s", paths$in_sample_train_data))
 message(sprintf("In-sample test split: %s", paths$in_sample_test_data))
 message(sprintf("Model bundle: %s", paths$model_bundle))
