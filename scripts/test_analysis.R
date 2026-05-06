@@ -8,9 +8,9 @@
 # pass the encoded CSV path here.
 #
 # Usage:
-#   Rscript test_analysis.R                              # uses ./test.xlsx
-#   Rscript test_analysis.R path/to/encoded_test.csv
-#   Rscript test_analysis.R path/to/encoded_test.csv xgboost   # XGBoost only:
+#   Rscript scripts/test_analysis.R                      # uses ./Data/future/test.xlsx
+#   Rscript scripts/test_analysis.R path/to/encoded_test.csv
+#   Rscript scripts/test_analysis.R path/to/encoded_test.csv xgboost   # XGBoost only:
 #       requires only bundle XGBoost feature columns + TOTEXP (not RF/spline).
 #   For prediction-focused workflows see scripts/predict_xgboost_newdata.R
 #
@@ -65,7 +65,7 @@ prepare_numeric_frame <- function(df, columns, medians) {
 }
 
 script_path <- get_script_path()
-project_root <- normalizePath(dirname(script_path), mustWork = TRUE)
+project_root <- normalizePath(file.path(dirname(script_path), ".."), mustWork = TRUE)
 source(file.path(project_root, "src", "paths.R"))
 source(file.path(project_root, "src", "download_packages.R"))
 
@@ -78,7 +78,7 @@ xgboost_only <- length(args) >= 2L && tolower(trimws(args[[2]])) == "xgboost"
 data_path <- if (length(args) >= 1L) {
   normalizePath(args[[1]], mustWork = TRUE)
 } else {
-  file.path(project_root, "test.xlsx")
+  file.path(project_root, "Data", "future", "test.xlsx")
 }
 
 if (!file.exists(paths$model_bundle)) {

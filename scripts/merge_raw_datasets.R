@@ -128,8 +128,10 @@ ensure_package("readxl")
 
 script_path <- get_script_path()
 project_root <- normalizePath(file.path(dirname(script_path), ".."), mustWork = TRUE)
-raw_dir <- file.path(project_root, "data", "raw")
-output_dir <- file.path(project_root, "data", "cleaned")
+source(file.path(project_root, "src", "paths.R"))
+paths <- build_project_paths(project_root)
+raw_dir <- file.path(paths$data_dir, "raw")
+output_dir <- paths$cleaned_dir
 
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
@@ -153,9 +155,23 @@ row_count_summary <- list()
 for (i in seq_len(nrow(file_specs))) {
   spec <- file_specs[i, ]
   input_path <- file.path(raw_dir, spec$file_name)
+  if (!file.exists(input_path)) {
+    raw_files <- list.files(raw_dir, full.names = FALSE)
+    matched <- raw_files[tolower(raw_files) == tolower(spec$file_name)]
+    if (length(matched) > 0) {
+      input_path <- file.path(raw_dir, matched[[1]])
+    }
+  }
 
   if (!file.exists(input_path)) {
-    stop(sprintf("Missing input file: %s", input_path), call. = FALSE)
+    stop(
+      sprintf(
+        "Missing input file: %s (searched in %s).",
+        spec$file_name,
+        raw_dir
+      ),
+      call. = FALSE
+    )
   }
 
   message(sprintf("Reading %s ...", spec$file_name))

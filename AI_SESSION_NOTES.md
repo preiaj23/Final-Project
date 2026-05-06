@@ -91,3 +91,40 @@ Rscript test_analysis.R
 Rscript test_analysis.R path/to/encoded_test.csv
 ```
 
+# AI session notes (May 5, 2026) - Sasha
+
+**Prompt:** The request was to run the full workflow (`make packages`, `make clean`, `make train`, `make test`, `make evaluate`), report RMSLE, debug workflow failures, and improve XGBoost so tuning aligns with RMSLE.
+
+**Suggestion:** The approach was to execute the pipeline end-to-end, identify blocking failures, then patch incrementally: fix training crashes, improve workflow robustness (future Excel ingestion), and rework XGBoost selection so both tuning and refit rounds are selected using RMSLE-aware validation.
+
+**Implementation:**  
+- Executed the Make targets and found initial failures:
+  - `make train` crashed in XGBoost tuning (results frame size bug and deprecated API usage).
+  - `make evaluate` failed when only `Data/future/test.xlsx` existed.
+- Patched `scripts/train_models.R` to fix the tuning crash and logging, then added:
+  - local/cluster XGBoost profiles,
+  - checkpointed tuning,
+  - fold-wise out-of-fold RMSLE scoring for config ranking,
+  - RMSLE-based custom metric (`custom_metric`) for within-fold early stopping,
+  - holdout RMSLE-based selection of final refit rounds,
+  - compatibility fixes for newer XGBoost R object structure when reading best tree counts.
+- Patched `scripts/evaluate_models.R` to auto-read Excel files in `Data/future` when CSV is missing, write a normalized CSV for future runs, and handle missing feature columns by median-imputation defaults.
+- Updated `Makefile` `evaluate` target to avoid redundant package bootstrap.
+
+**Outcome:**  
+- Local training now completes with RMSLE-aligned XGBoost tuning and selects XGBoost as best in-sample test model:
+  - `xgboost` RMSLE `2.8573975031`, RMSE `19258.8173241788`
+  - `piecewise_polynomial_spline` RMSLE `2.9242136793`
+- Cluster profile run also completed successfully with numeric CV RMSLE recorded for all configs.
+
+**Authorship:** The pipeline debugging, R script updates, and documentation updates were drafted by Cursor’s AI assistant on Sasha’s behalf.
+
+```sh
+make packages
+make clean
+make train
+make test
+make evaluate
+Rscript scripts/train_models.R cluster
+```
+

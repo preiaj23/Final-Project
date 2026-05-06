@@ -39,7 +39,11 @@ rmse <- function(actual, pred) {
 prepare_numeric_frame <- function(df, columns, medians) {
   out <- data.frame(row.names = seq_len(nrow(df)))
   for (nm in columns) {
-    vals <- coerce_numeric(df[[nm]])
+    if (nm %in% names(df)) {
+      vals <- coerce_numeric(df[[nm]])
+    } else {
+      vals <- rep(NA_real_, nrow(df))
+    }
     med <- medians[[nm]]
     if (!is.finite(med)) {
       med <- suppressWarnings(stats::median(vals, na.rm = TRUE))
@@ -60,7 +64,7 @@ source(file.path(project_root, "src", "download_packages.R"))
 
 paths <- build_project_paths(project_root)
 ensure_project_dirs(paths)
-bootstrap_model_packages(project_root)
+bootstrap_model_packages(project_root, extra_packages = c("readxl"))
 
 cli_args <- commandArgs(trailingOnly = TRUE)
 force_xgboost <- length(cli_args) >= 1L && tolower(trimws(cli_args[[1]])) == "xgboost"
@@ -73,15 +77,46 @@ if (!force_xgboost && !file.exists(paths$best_model_pointer)) {
   stop(sprintf("Best model path file not found at %s. Run test_models first.", paths$best_model_pointer), call. = FALSE)
 }
 
-if (!file.exists(paths$future_out_of_sample_data)) {
-  stop(
-    sprintf("Future out-of-sample test data not found at %s.", paths$future_out_of_sample_data),
-    call. = FALSE
+future_data_path <- paths$future_out_of_sample_data
+future_df <- NULL
+
+if (file.exists(future_data_path)) {
+  future_df <- utils::read.csv(future_data_path, check.names = FALSE, stringsAsFactors = FALSE)
+} else {
+  xlsx_candidates <- list.files(
+    paths$future_dir,
+    pattern = "\\.(xlsx|xls)$",
+    full.names = TRUE,
+    ignore.case = TRUE
   )
+
+  if (length(xlsx_candidates) == 0L) {
+    stop(
+      sprintf(
+        "Future out-of-sample data not found. Expected CSV at %s or an Excel file in %s.",
+        future_data_path,
+        paths$future_dir
+      ),
+      call. = FALSE
+    )
+  }
+
+  preferred_name <- file.path(paths$future_dir, "test.xlsx")
+  if (file.exists(preferred_name)) {
+    chosen_xlsx <- preferred_name
+  } else {
+    xlsx_candidates <- sort(xlsx_candidates)
+    chosen_xlsx <- xlsx_candidates[[1L]]
+  }
+
+  message(sprintf("CSV not found; loading future data from Excel: %s", chosen_xlsx))
+  future_df <- readxl::read_excel(chosen_xlsx, .name_repair = "minimal")
+  future_df <- as.data.frame(future_df, check.names = FALSE, stringsAsFactors = FALSE)
+  utils::write.csv(future_df, future_data_path, row.names = FALSE, na = "")
+  message(sprintf("Wrote normalized CSV for future runs: %s", future_data_path))
 }
 
 bundle <- readRDS(paths$model_bundle)
-future_df <- utils::read.csv(paths$future_out_of_sample_data, check.names = FALSE, stringsAsFactors = FALSE)
 names(future_df) <- sub("^[^.]+\\.", "", names(future_df))
 
 target_name <- bundle$metadata$target_name
@@ -157,7 +192,7 @@ score_rmsle <- rmsle(actual, pred)
 score_rmse <- rmse(actual, pred)
 result <- data.frame(
   model = best_model_key,
-  evaluation_dataset = paths$future_out_of_sample_data,
+  evaluation_dataset = future_data_path,
   rmsle = score_rmsle,
   rmse = score_rmse,
   stringsAsFactors = FALSE

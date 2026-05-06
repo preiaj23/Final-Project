@@ -15,7 +15,9 @@ get_project_root <- function(script_path = get_script_path()) {
 }
 
 build_project_paths <- function(project_root = get_project_root()) {
-  data_dir <- file.path(project_root, "data")
+  data_dir_candidates <- c(file.path(project_root, "Data"), file.path(project_root, "data"))
+  existing_data_dirs <- data_dir_candidates[file.exists(data_dir_candidates)]
+  data_dir <- if (length(existing_data_dirs) > 0) existing_data_dirs[[1]] else data_dir_candidates[[1]]
   cleaned_dir <- file.path(data_dir, "cleaned")
   split_dir <- file.path(data_dir, "splits")
   future_dir <- file.path(data_dir, "future")

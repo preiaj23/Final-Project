@@ -77,11 +77,25 @@ rmsle <- function(actual, pred) {
   sqrt(mean((log1p(pred) - log1p(actual))^2))
 }
 
+feval_rmsle <- function(preds, dtrain) {
+  labels <- xgboost::getinfo(dtrain, "label")
+  pred <- clip_nonnegative(as.numeric(preds))
+  err <- sqrt(mean((log1p(pred) - log1p(labels))^2))
+  list(metric = "rmsle", value = err)
+}
+
 rmse_raw <- function(actual, pred) {
   sqrt(mean((actual - pred)^2))
 }
 
 xgb_best_tree_count <- function(fit) {
+  es <- attr(fit, "early_stop")
+  if (!is.null(es) && !is.null(es$best_iteration)) {
+    bi <- es$best_iteration
+    if (length(bi) == 1L && is.finite(bi) && bi >= 1L) {
+      return(as.integer(bi))
+    }
+  }
   bi <- fit$best_iteration
   if (!is.null(bi) && length(bi) == 1L && is.finite(bi) && bi >= 1L) {
     return(as.integer(bi))
@@ -90,30 +104,74 @@ xgb_best_tree_count <- function(fit) {
   if (!is.null(ni) && length(ni) == 1L && is.finite(ni) && ni >= 1L) {
     return(as.integer(ni))
   }
+  cfg <- tryCatch(xgboost::xgb.config(fit), error = function(e) NULL)
+  if (!is.null(cfg)) {
+    nt <- cfg$learner$gradient_booster$gbtree_model_param$num_trees
+    if (!is.null(nt) && nzchar(nt)) {
+      v <- suppressWarnings(as.integer(nt))
+      if (is.finite(v) && v >= 1L) {
+        return(v)
+      }
+    }
+  }
   1L
 }
 
 tune_xgboost_rmse <- function(
-  dsub,
-  dval,
-  y_val,
+  x_train,
+  y_train,
   param_grid,
-  nrounds_max = 800L,
-  early_stopping_rounds = 35L,
-  seed = 2027L
+  nfold = 3L,
+  nrounds_max = 2000L,
+  early_stopping_rounds = 100L,
+  seed = 2027L,
+  nthread = 2L,
+  checkpoint_path = NULL
 ) {
+  n <- nrow(x_train)
+  if (length(y_train) != n) {
+    stop("x_train row count must equal y_train length for xgboost tuning.", call. = FALSE)
+  }
+
+  set.seed(seed)
+  fold_id <- sample(rep(seq_len(nfold), length.out = n))
+
   results <- data.frame(
-    val_rmse = NA_real_,
-    best_nrounds = NA_integer_,
+    val_rmse = rep(NA_real_, nrow(param_grid)),
+    val_rmsle = rep(NA_real_, nrow(param_grid)),
+    best_nrounds = rep(NA_integer_, nrow(param_grid)),
     stringsAsFactors = FALSE
   )
 
+  if (!is.null(checkpoint_path) && file.exists(checkpoint_path)) {
+    prior <- utils::read.csv(checkpoint_path, stringsAsFactors = FALSE)
+    if ("config_id" %in% names(prior)) {
+      prior <- prior[match(param_grid$config_id, prior$config_id), , drop = FALSE]
+      if ("val_rmse" %in% names(prior)) {
+        results$val_rmse <- as.numeric(prior$val_rmse)
+      }
+      if ("val_rmsle" %in% names(prior)) {
+        results$val_rmsle <- as.numeric(prior$val_rmsle)
+      }
+      if ("best_nrounds" %in% names(prior)) {
+        results$best_nrounds <- as.integer(prior$best_nrounds)
+      }
+    }
+  }
+
+  message(sprintf("Starting xgboost tuning over %d configurations...", nrow(param_grid)))
+
   for (i in seq_len(nrow(param_grid))) {
+    if (is.finite(results$val_rmse[[i]])) {
+      message(sprintf("xgboost tune %d/%d skipped (already completed)", i, nrow(param_grid)))
+      next
+    }
+
     set.seed(seed + i)
     pg <- param_grid[i, , drop = FALSE]
     params <- list(
       objective = "reg:squarederror",
-      eval_metric = "rmse",
+      disable_default_eval_metric = 1,
       max_depth = as.integer(pg$max_depth),
       eta = as.numeric(pg$eta),
       min_child_weight = as.numeric(pg$min_child_weight),
@@ -130,22 +188,104 @@ tune_xgboost_rmse <- function(
       params$reg_lambda <- as.numeric(pg$reg_lambda)
     }
 
-    fit <- xgboost::xgb.train(
-      params = params,
-      data = dsub,
-      nrounds = nrounds_max,
-      watchlist = list(train = dsub, val = dval),
-      early_stopping_rounds = early_stopping_rounds,
-      verbose = 0
-    )
+    oof_pred <- rep(NA_real_, n)
+    fold_best_rounds <- integer(nfold)
 
-    bi <- xgb_best_tree_count(fit)
-    pred <- stats::predict(fit, newdata = dval, iterationrange = c(1L, bi))
-    results$val_rmse[[i]] <- rmse_raw(y_val, clip_nonnegative(pred))
-    results$best_nrounds[[i]] <- bi
+    for (f in seq_len(nfold)) {
+      valid_idx <- which(fold_id == f)
+      train_idx <- which(fold_id != f)
+
+      dtrain_fold <- xgboost::xgb.DMatrix(data = x_train[train_idx, , drop = FALSE], label = y_train[train_idx])
+      dvalid_fold <- xgboost::xgb.DMatrix(data = x_train[valid_idx, , drop = FALSE], label = y_train[valid_idx])
+
+      fold_fit <- xgboost::xgb.train(
+        params = params,
+        data = dtrain_fold,
+        nrounds = nrounds_max,
+        evals = list(valid = dvalid_fold),
+        custom_metric = feval_rmsle,
+        early_stopping_rounds = early_stopping_rounds,
+        maximize = FALSE,
+        nthread = as.integer(nthread),
+        verbose = 0
+      )
+
+      bi_fold <- xgb_best_tree_count(fold_fit)
+      fold_best_rounds[[f]] <- bi_fold
+      oof_pred[valid_idx] <- stats::predict(
+        fold_fit,
+        newdata = dvalid_fold,
+        iterationrange = c(1L, bi_fold)
+      )
+
+      rm(fold_fit, dtrain_fold, dvalid_fold)
+      invisible(gc(verbose = FALSE))
+    }
+
+    results$val_rmse[[i]] <- rmse_raw(y_train, clip_nonnegative(oof_pred))
+    results$val_rmsle[[i]] <- rmsle(y_train, clip_nonnegative(oof_pred))
+    results$best_nrounds[[i]] <- as.integer(round(stats::median(fold_best_rounds)))
+    message(sprintf(
+      "xgboost tune %d/%d complete (cv RMSE: %.6f, cv RMSLE: %.6f, rounds: %d)",
+      i,
+      nrow(param_grid),
+      results$val_rmse[[i]],
+      results$val_rmsle[[i]],
+      results$best_nrounds[[i]]
+    ))
+
+    if (!is.null(checkpoint_path)) {
+      utils::write.csv(cbind(param_grid, results), checkpoint_path, row.names = FALSE, na = "")
+    }
+
+    rm(oof_pred, fold_best_rounds)
+    invisible(gc(verbose = FALSE))
   }
 
   cbind(param_grid, results, row.names = NULL)
+}
+
+xgb_refit_rounds_from_holdout_rmsle <- function(
+  x_mat,
+  y,
+  params,
+  nrounds_max,
+  early_stopping_rounds,
+  nthread,
+  val_frac = 0.1,
+  seed = 2029L,
+  min_val_rows = 50L
+) {
+  n <- nrow(x_mat)
+  n_val <- max(min_val_rows, floor(val_frac * n))
+  n_val <- min(n_val, n - max(min_val_rows, 50L))
+  if (n_val < 1L || n - n_val < 1L) {
+    stop("Not enough rows for XGBoost refit holdout.", call. = FALSE)
+  }
+
+  set.seed(seed)
+  val_idx <- sample.int(n, n_val)
+  train_idx <- setdiff(seq_len(n), val_idx)
+
+  dtr <- xgboost::xgb.DMatrix(data = x_mat[train_idx, , drop = FALSE], label = y[train_idx])
+  dv <- xgboost::xgb.DMatrix(data = x_mat[val_idx, , drop = FALSE], label = y[val_idx])
+
+  fit <- xgboost::xgb.train(
+    params = params,
+    data = dtr,
+    nrounds = nrounds_max,
+    evals = list(valid = dv),
+    custom_metric = feval_rmsle,
+    early_stopping_rounds = early_stopping_rounds,
+    maximize = FALSE,
+    nthread = as.integer(nthread),
+    verbose = 0
+  )
+
+  bi <- xgb_best_tree_count(fit)
+  rm(fit, dtr, dv)
+  invisible(gc(verbose = FALSE))
+  bi
 }
 
 tune_random_forest_rmse <- function(
@@ -321,6 +461,32 @@ project_root <- normalizePath(file.path(dirname(script_path), ".."), mustWork = 
 source(file.path(project_root, "src", "paths.R"))
 source(file.path(project_root, "src", "download_packages.R"))
 
+cli_args <- commandArgs(trailingOnly = TRUE)
+profile_mode <- if (length(cli_args) >= 1L) tolower(trimws(cli_args[[1L]])) else "local"
+if (!profile_mode %in% c("local", "cluster")) {
+  stop("Unsupported profile mode. Use either 'local' (default) or 'cluster'.", call. = FALSE)
+}
+
+xgb_profile <- if (profile_mode == "cluster") {
+  list(
+    feature_count = 700L,
+    tune_configs = 120L,
+    nfold = 5L,
+    nrounds_max = 4000L,
+    early_stopping_rounds = 150L,
+    nthread = 8L
+  )
+} else {
+  list(
+    feature_count = 300L,
+    tune_configs = 40L,
+    nfold = 3L,
+    nrounds_max = 2000L,
+    early_stopping_rounds = 100L,
+    nthread = 2L
+  )
+}
+
 paths <- build_project_paths(project_root)
 ensure_project_dirs(paths)
 bootstrap_model_packages(project_root)
@@ -393,8 +559,10 @@ y_test <- test_df[[target_name]]
 
 message(sprintf("Training rows: %d", nrow(train_df)))
 message(sprintf("Testing rows: %d", nrow(test_df)))
+message(sprintf("XGBoost profile: %s", profile_mode))
 
 # Intercept-only baseline
+message("Training intercept baseline...")
 intercept_fit <- stats::lm(stats::as.formula(sprintf("%s ~ 1", target_name)), data = train_df)
 pred_intercept <- clip_nonnegative(stats::predict(intercept_fit, newdata = test_df))
 rmsle_intercept <- rmsle(y_test, pred_intercept)
@@ -409,6 +577,7 @@ cor_scores[!is.finite(cor_scores)] <- 0
 top_features <- names(sort(cor_scores, decreasing = TRUE))[seq_len(min(80, length(cor_scores)))]
 
 # Random forest
+message("Training random forest...")
 set.seed(2026)
 rf_rows <- sample.int(nrow(train_df), size = min(30000L, nrow(train_df)))
 rf_train <- train_df[rf_rows, c(top_features, target_name), drop = FALSE]
@@ -465,8 +634,9 @@ rf_fit <- randomForest::randomForest(
 pred_rf <- clip_nonnegative(stats::predict(rf_fit, newdata = rf_test))
 rmsle_rf <- rmsle(y_test, pred_rf)
 
-# xgboost: validation RMSE grid search + early stopping, then refit on full xgb sample
-xgb_features <- names(sort(cor_scores, decreasing = TRUE))[seq_len(min(150, length(cor_scores)))]
+# xgboost: CV RMSE grid search + early stopping, then refit on full xgb sample
+message("Training xgboost (with hyperparameter tuning)...")
+xgb_features <- names(sort(cor_scores, decreasing = TRUE))[seq_len(min(xgb_profile$feature_count, length(cor_scores)))]
 set.seed(2027)
 xgb_rows <- sample.int(nrow(train_df), size = min(50000L, nrow(train_df)))
 xgb_train_df <- train_df[xgb_rows, , drop = FALSE]
@@ -474,63 +644,47 @@ xgb_train_y <- xgb_train_df[[target_name]]
 xgb_train_build <- build_feature_matrix(xgb_train_df, xgb_features)
 xgb_test_build <- build_feature_matrix(test_df, xgb_features, medians = xgb_train_build$medians)
 dtest <- xgboost::xgb.DMatrix(data = xgb_test_build$matrix, label = y_test)
-
-val_frac <- 0.15
-n_xgb <- nrow(xgb_train_df)
-n_val <- max(50L, floor(val_frac * n_xgb))
-set.seed(2027)
-val_idx <- sample.int(n_xgb, size = n_val)
-sub_idx <- setdiff(seq_len(n_xgb), val_idx)
-if (length(sub_idx) < 100L) {
-  stop("XGBoost tuning split produced too few training rows.", call. = FALSE)
-}
-
-xgb_sub_df <- xgb_train_df[sub_idx, , drop = FALSE]
-xgb_val_df <- xgb_train_df[val_idx, , drop = FALSE]
-dsub <- xgboost::xgb.DMatrix(
-  data = build_feature_matrix(xgb_sub_df, xgb_features, medians = xgb_train_build$medians)$matrix,
-  label = xgb_sub_df[[target_name]]
-)
-dval <- xgboost::xgb.DMatrix(
-  data = build_feature_matrix(xgb_val_df, xgb_features, medians = xgb_train_build$medians)$matrix,
-  label = xgb_val_df[[target_name]]
-)
 dfull <- xgboost::xgb.DMatrix(data = xgb_train_build$matrix, label = xgb_train_y)
 
 xgb_param_space <- expand.grid(
-  max_depth = c(4L, 5L, 6L, 7L, 8L, 10L),
-  eta = c(0.02, 0.03, 0.05, 0.07, 0.1),
-  min_child_weight = c(1, 2, 3, 5, 7, 10),
-  subsample = c(0.65, 0.75, 0.85, 0.95, 1),
-  colsample_bytree = c(0.65, 0.75, 0.85, 0.95, 1),
-  gamma = c(0, 0.1, 0.5),
+  max_depth = c(3L, 4L, 5L, 6L, 7L, 8L, 10L),
+  eta = c(0.01, 0.02, 0.03, 0.05),
+  min_child_weight = c(1, 3, 5, 10, 20, 40),
+  subsample = c(0.6, 0.75, 0.9, 1.0),
+  colsample_bytree = c(0.6, 0.75, 0.9, 1.0),
+  gamma = c(0, 0.5, 1, 2),
   reg_alpha = c(0, 0.01, 0.1),
-  reg_lambda = c(1, 5, 10),
+  reg_lambda = c(1, 5, 10, 25, 50),
   stringsAsFactors = FALSE
 )
 set.seed(2028L)
-n_xgb_tune <- min(55L, nrow(xgb_param_space))
+n_xgb_tune <- min(as.integer(xgb_profile$tune_configs), nrow(xgb_param_space))
 xgb_param_grid <- xgb_param_space[sample.int(nrow(xgb_param_space), n_xgb_tune), , drop = FALSE]
+xgb_param_grid$config_id <- seq_len(nrow(xgb_param_grid))
 rownames(xgb_param_grid) <- NULL
 
+xgb_tune_path <- file.path(paths$metrics_dir, sprintf("xgboost_hyperparameter_tune_%s.csv", profile_mode))
+legacy_xgb_tune_path <- file.path(paths$metrics_dir, "xgboost_hyperparameter_tune.csv")
 xgb_tune_results <- tune_xgboost_rmse(
-  dsub = dsub,
-  dval = dval,
-  y_val = xgb_val_df[[target_name]],
+  x_train = xgb_train_build$matrix,
+  y_train = xgb_train_y,
   param_grid = xgb_param_grid,
-  nrounds_max = 1500L,
-  early_stopping_rounds = 50L,
-  seed = 2027L
+  nfold = as.integer(xgb_profile$nfold),
+  nrounds_max = as.integer(xgb_profile$nrounds_max),
+  early_stopping_rounds = as.integer(xgb_profile$early_stopping_rounds),
+  seed = 2027L,
+  nthread = as.integer(xgb_profile$nthread),
+  checkpoint_path = xgb_tune_path
 )
-xgb_tune_results <- xgb_tune_results[order(xgb_tune_results$val_rmse), , drop = FALSE]
+xgb_tune_results <- xgb_tune_results[order(xgb_tune_results$val_rmsle, xgb_tune_results$val_rmse), , drop = FALSE]
 xgb_tune_results$rank <- seq_len(nrow(xgb_tune_results))
-xgb_tune_path <- file.path(paths$metrics_dir, "xgboost_hyperparameter_tune.csv")
 utils::write.csv(xgb_tune_results, xgb_tune_path, row.names = FALSE, na = "")
+utils::write.csv(xgb_tune_results, legacy_xgb_tune_path, row.names = FALSE, na = "")
 
 best_xgb_row <- xgb_tune_results[1, , drop = FALSE]
 xgb_final_params <- list(
   objective = "reg:squarederror",
-  eval_metric = "rmse",
+  disable_default_eval_metric = 1,
   max_depth = as.integer(best_xgb_row$max_depth),
   eta = as.numeric(best_xgb_row$eta),
   min_child_weight = as.numeric(best_xgb_row$min_child_weight),
@@ -546,23 +700,38 @@ if ("reg_alpha" %in% names(best_xgb_row)) {
 if ("reg_lambda" %in% names(best_xgb_row)) {
   xgb_final_params$reg_lambda <- as.numeric(best_xgb_row$reg_lambda)
 }
+
+xgb_refit_rounds <- xgb_refit_rounds_from_holdout_rmsle(
+  x_mat = xgb_train_build$matrix,
+  y = xgb_train_y,
+  params = xgb_final_params,
+  nrounds_max = as.integer(xgb_profile$nrounds_max),
+  early_stopping_rounds = as.integer(xgb_profile$early_stopping_rounds),
+  nthread = as.integer(xgb_profile$nthread),
+  val_frac = 0.1,
+  seed = 2029L
+)
+message(sprintf("XGBoost refit rounds (holdout RMSLE early stop): %d", xgb_refit_rounds))
+
 set.seed(2027)
 xgb_fit <- xgboost::xgb.train(
   params = xgb_final_params,
   data = dfull,
-  nrounds = as.integer(best_xgb_row$best_nrounds),
+  nrounds = as.integer(xgb_refit_rounds),
+  nthread = as.integer(xgb_profile$nthread),
   verbose = 0
 )
 pred_xgb <- clip_nonnegative(
   stats::predict(
     xgb_fit,
     newdata = dtest,
-    iterationrange = c(1L, xgb_best_tree_count(xgb_fit))
+    iterationrange = c(1L, as.integer(xgb_refit_rounds))
   )
 )
 rmsle_xgb <- rmsle(y_test, pred_xgb)
 
 # Piecewise polynomial with smoothing splines and 5-fold CV
+message("Training piecewise polynomial spline...")
 spline_candidates <- names(sort(cor_scores, decreasing = TRUE))[seq_len(min(12, length(cor_scores)))]
 set.seed(2028)
 spline_rows <- sample.int(nrow(train_df), size = min(15000L, nrow(train_df)))
@@ -698,7 +867,9 @@ bundle <- list(
       medians = xgb_train_build$medians,
       tuning = list(
         validation_rmse = as.numeric(best_xgb_row$val_rmse),
-        best_nrounds = as.integer(best_xgb_row$best_nrounds),
+        validation_rmsle_cv = as.numeric(best_xgb_row$val_rmsle),
+        cv_median_nrounds = as.integer(best_xgb_row$best_nrounds),
+        refit_nrounds_rmsle_holdout = as.integer(xgb_refit_rounds),
         max_depth = as.integer(best_xgb_row$max_depth),
         eta = as.numeric(best_xgb_row$eta),
         min_child_weight = as.numeric(best_xgb_row$min_child_weight),

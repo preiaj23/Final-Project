@@ -63,6 +63,22 @@ Use `scripts/train_models.R` after cleaning to train and compare:
 
 The script uses an 80/20 in-sample train-test split, clips negative predictions to zero for all models, and ranks models by RMSLE. It reads shared paths from `src/paths.R`, installs modeling dependencies from `src/download_packages.R`, and defensively one-hot encodes any remaining categorical variables that have 20 or fewer categories.
 
+`train_models.R` supports two XGBoost tuning profiles:
+
+- `local` (default): lower-cost search for workstation runs
+- `cluster`: larger search/CV settings for higher-resource environments
+
+```sh
+Rscript scripts/train_models.R
+Rscript scripts/train_models.R cluster
+```
+
+XGBoost tuning behavior (latest):
+
+- Hyperparameter configs are ranked by cross-validated RMSLE (with RMSE as tie-breaker).
+- Within-fold early stopping is driven by an RMSLE custom metric.
+- Final refit rounds are selected by a holdout RMSLE early-stopping pass, then the final model is fit on the full XGBoost training matrix for that selected number of rounds.
+
 Run it with:
 
 ```sh
@@ -98,9 +114,23 @@ Run it with:
 Rscript scripts/evaluate_models.R
 ```
 
+If `data/future/future_out_of_sample_test.csv` is missing, the script now falls back to an Excel file in `Data/future` (prefers `test.xlsx` when present), loads it, and writes a normalized CSV to `data/future/future_out_of_sample_test.csv` for subsequent runs.
+
 Output:
 
 - `output/metrics/out_of_sample_best_model_rmsle.csv`: RMSLE of the selected best model on out-of-sample test data.
+
+## Ad-hoc Test Analysis Script
+
+Use `scripts/test_analysis.R` to evaluate saved models against a provided encoded test file (or default to `Data/future/test.xlsx`).
+
+Run it with:
+
+```sh
+Rscript scripts/test_analysis.R
+Rscript scripts/test_analysis.R path/to/encoded_test.csv
+Rscript scripts/test_analysis.R path/to/encoded_test.csv xgboost
+```
 
 ## Shared src Utilities
 
@@ -113,9 +143,23 @@ Output:
 make clean      # merge + clean/encode
 make train      # train and persist models/artifacts
 make test       # evaluate trained models and select best by RMSLE
-make evaluate   # packages + merge + clean + train + test + out-of-sample RMSLE
+make evaluate   # packages + evaluate current best model on out-of-sample data (no retraining)
 make all        # full pipeline: merge -> clean -> train -> test
 ```
+
+## Session update (May 5, 2026)
+
+This session focused on end-to-end workflow validation and XGBoost improvements:
+
+- Ran `make packages`, `make clean`, `make train`, `make test`, `make evaluate` and fixed pipeline blockers.
+- Fixed XGBoost tuning crash and updated tuning to RMSLE-aligned selection.
+- Added profile-based XGBoost training (`local`/`cluster`) and more robust tune checkpoint behavior.
+- Updated evaluate logic to automatically accept future Excel input when CSV is missing.
+
+Latest local training result (`output/metrics/train_rmsle_comparison.csv`):
+
+- **xgboost**: RMSLE `2.8573975031` (best)
+- piecewise polynomial spline: RMSLE `2.9242136793`
 
 Outputs are now split by purpose:
 
