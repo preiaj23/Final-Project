@@ -1,5 +1,10 @@
 #!/usr/bin/env Rscript
 
+# Evaluate the chosen trained model, or XGBoost when requested, on the future
+# out-of-sample dataset and write the resulting error metrics.
+
+# Resolve this script's path so project-relative paths work from any launch
+# directory.
 get_script_path <- function() {
   file_arg <- "--file="
   args <- commandArgs(trailingOnly = FALSE)
@@ -12,6 +17,7 @@ get_script_path <- function() {
   normalizePath(getwd(), mustWork = TRUE)
 }
 
+# Convert factors and numeric-looking strings into numeric vectors for scoring.
 coerce_numeric <- function(x) {
   if (is.factor(x)) {
     x <- as.character(x)
@@ -22,10 +28,12 @@ coerce_numeric <- function(x) {
   x
 }
 
+# Keep all model outputs within the valid non-negative spending range.
 clip_nonnegative <- function(pred) {
   pmax(pred, 0)
 }
 
+# Error metrics used to summarize out-of-sample model performance.
 rmsle <- function(actual, pred) {
   pred <- clip_nonnegative(pred)
   sqrt(mean((log1p(pred) - log1p(actual))^2))
@@ -36,6 +44,8 @@ rmse <- function(actual, pred) {
   sqrt(mean((actual - pred)^2))
 }
 
+# Build a complete numeric frame for a model's saved feature list, filling
+# missing values with training medians when available.
 prepare_numeric_frame <- function(df, columns, medians) {
   out <- data.frame(row.names = seq_len(nrow(df)))
   for (nm in columns) {
@@ -80,6 +90,8 @@ if (!force_xgboost && !file.exists(paths$best_model_pointer)) {
 future_data_path <- paths$future_out_of_sample_data
 future_df <- NULL
 
+# Prefer the normalized CSV if it already exists; otherwise load the Excel future
+# file, convert it to a CSV, and reuse that normalized file on future runs.
 if (file.exists(future_data_path)) {
   future_df <- utils::read.csv(future_data_path, check.names = FALSE, stringsAsFactors = FALSE)
 } else {
@@ -119,6 +131,7 @@ if (file.exists(future_data_path)) {
 bundle <- readRDS(paths$model_bundle)
 names(future_df) <- sub("^[^.]+\\.", "", names(future_df))
 
+# The future dataset must contain the target so this script can compute metrics.
 target_name <- bundle$metadata$target_name
 if (!target_name %in% names(future_df)) {
   stop(sprintf("Target column %s missing in future out-of-sample dataset.", target_name), call. = FALSE)
@@ -129,6 +142,8 @@ if (any(!is.finite(actual) | actual < 0)) {
   stop("Out-of-sample target has invalid values; expected non-negative finite target.", call. = FALSE)
 }
 
+# Decide whether to use XGBoost explicitly or the best-model pointer produced by
+# test_models.R.
 if (force_xgboost) {
   best_model_key <- "xgboost"
 } else {
@@ -151,6 +166,8 @@ if (force_xgboost) {
   }
 }
 
+# Score the future rows with the selected model, rebuilding any model-specific
+# feature frames from the saved training artifacts.
 pred <- switch(
   best_model_key,
   intercept = {
@@ -188,6 +205,7 @@ pred <- switch(
   }
 )
 
+# Write a one-row metric summary for the future out-of-sample evaluation.
 score_rmsle <- rmsle(actual, pred)
 score_rmse <- rmse(actual, pred)
 result <- data.frame(

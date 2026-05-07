@@ -41,6 +41,8 @@ source(file.path(project_root, "src", "paths.R"))
 paths <- build_project_paths(project_root)
 ensure_project_dirs(paths)
 
+# MEPS negative response codes are treated as categorical labels so missing-like
+# survey responses are preserved instead of silently becoming numeric values.
 NEG_CODES <- c(
   "-1"  = "INAPPLICABLE",
   "-2"  = "PREV_ROUND",
@@ -50,6 +52,7 @@ NEG_CODES <- c(
   "-15" = "CANNOT_COMPUTE"
 )
 
+# Human-readable labels for project variables with known positive survey codes.
 POS_CODE_MAPS <- list(
   REGION = c(`1` = "Northeast", `2` = "Midwest", `3` = "South", `4` = "West"),
   MARRYX = c(
@@ -111,6 +114,8 @@ POS_CODE_MAPS <- list(
   FILEDR = c(`1` = "Yes", `2` = "No")
 )
 
+# Regex groups identify variables that should be encoded as multi-level
+# categorical predictors.
 MULTICLASS_PATTERNS <- c(
   "^REGION$",
   "^MARRYX$",
@@ -122,6 +127,8 @@ MULTICLASS_PATTERNS <- c(
   "^MNHLTH[0-9]+$"
 )
 
+# Regex groups identify variables that should be encoded as yes/no-style
+# categorical predictors.
 BINARY_PATTERNS <- c(
   "^SEX$",
   "^ASTHDX$",
@@ -131,6 +138,7 @@ BINARY_PATTERNS <- c(
   "^FILEDR$"
 )
 
+# Continuous variables stay numeric and avoid one-hot encoding.
 CONTINUOUS_PATTERNS <- c(
   "^AGEX$",
   "^TTLPX$",
@@ -141,6 +149,8 @@ CONTINUOUS_PATTERNS <- c(
   "^FAMINC$"
 )
 
+# ID and metadata columns are carried through to help trace rows back to their
+# original source after cleaning.
 ID_COLUMNS <- c(
   "DUID",
   "PID",
@@ -153,10 +163,13 @@ ID_COLUMNS <- c(
 
 MAX_CATEGORICAL_CARDINALITY <- 20L
 
+# Return TRUE when a column name matches at least one regex in a pattern set.
 matches_any_pattern <- function(name, patterns) {
   any(vapply(patterns, function(p) grepl(p, name, perl = TRUE), logical(1)))
 }
 
+# Find the explicit positive-code label map for a variable, allowing numbered
+# versions such as RTHLTH31 to reuse the RTHLTH map.
 pos_map_for <- function(name) {
   if (name %in% names(POS_CODE_MAPS)) {
     return(POS_CODE_MAPS[[name]])
@@ -175,6 +188,8 @@ pos_map_for <- function(name) {
   NULL
 }
 
+# Convert raw numeric survey codes into readable categorical labels, including
+# standard negative response codes.
 label_variable <- function(x, pos_map) {
   numeric_x <- suppressWarnings(as.numeric(x))
   labels <- rep(NA_character_, length(numeric_x))
@@ -201,6 +216,7 @@ label_variable <- function(x, pos_map) {
   labels
 }
 
+# Convert labels into one-hot indicator columns for model-ready data.
 one_hot <- function(labels, var_name) {
   observed_levels <- sort(unique(labels[!is.na(labels)]))
   has_na <- any(is.na(labels))
@@ -226,6 +242,7 @@ one_hot <- function(labels, var_name) {
   as.data.frame(columns, check.names = FALSE, stringsAsFactors = FALSE)
 }
 
+# Assign each retained column to the encoding role used later in the script.
 classify_column <- function(name) {
   if (name %in% ID_COLUMNS) {
     return("id")
@@ -238,6 +255,8 @@ classify_column <- function(name) {
   "categorical"
 }
 
+# Apply the project exclusion rules for utilization, expenditure-source, and
+# survey-weight variables while protecting identifiers and the target variable.
 should_drop_column <- function(col) {
   if (col %in% c(
     "DATA_YEAR",
@@ -375,6 +394,7 @@ should_drop_column <- function(col) {
   FALSE
 }
 
+# Define the input merged file and the cleaned/encoded outputs produced here.
 input_path <- paths$merged_standardized_dataset
 dropped_path <- paths$dropped_variables
 encoded_path <- paths$merged_encoded_dataset
@@ -411,9 +431,11 @@ if (length(missing_columns) > 0) {
 
 n_before <- ncol(dataset)
 
+# Add a combined year/source label before dropping or encoding variables.
 dataset$DATASET_YEAR <- paste0(dataset$DATA_YEAR, "_", dataset$SOURCE_FILE)
 dataset$DATASET_YEAR <- as.character(dataset$DATASET_YEAR)
 
+# Drop excluded columns and keep an audit list of exactly what was removed.
 column_names <- names(dataset)
 drop_mask <- vapply(column_names, should_drop_column, logical(1))
 columns_to_drop <- sort(column_names[drop_mask])
@@ -434,6 +456,8 @@ utils::write.csv(dataset, input_path, row.names = FALSE, na = "")
 remaining_columns <- names(dataset)
 roles <- vapply(remaining_columns, classify_column, character(1))
 
+# Preserve ID columns first, then split the remaining predictors into continuous
+# and categorical groups for model-friendly encoding.
 id_cols <- remaining_columns[roles == "id"]
 id_cols <- c(
   intersect(ID_COLUMNS, id_cols),
@@ -460,6 +484,7 @@ if (length(continuous_cols) > 0) {
 
 manifest_rows <- list()
 
+# Record how each source variable appears in the encoded dataset for auditability.
 record_manifest <- function(source_name, role, n_output_columns, output_names) {
   manifest_rows[[length(manifest_rows) + 1]] <<- data.frame(
     source_variable = source_name,
@@ -478,6 +503,8 @@ for (col in continuous_cols) {
   record_manifest(col, "continuous", 1L, col)
 }
 
+# One-hot encode low-cardinality categorical variables and pass through
+# high-cardinality numeric codes to avoid creating very wide sparse data.
 encode_categorical <- function(cols) {
   categorical_mapped_count <- 0L
   categorical_raw_count <- 0L
@@ -536,6 +563,7 @@ encode_categorical <- function(cols) {
 
 categorical_summary <- encode_categorical(categorical_cols)
 
+# Append high-cardinality passthrough variables after the standard encoded parts.
 if (length(high_cardinality_parts) > 0) {
   encoded_parts[["__high_cardinality__"]] <- do.call(
     cbind,
@@ -543,6 +571,7 @@ if (length(high_cardinality_parts) > 0) {
   )
 }
 
+# Combine all encoded sections into the final model input table.
 encoded_dataset <- do.call(
   cbind,
   c(encoded_parts, list(stringsAsFactors = FALSE))
@@ -562,6 +591,7 @@ manifest <- if (length(manifest_rows) > 0) {
   )
 }
 
+# Save both the cleaned raw-scale dataset and the encoded model-ready dataset.
 utils::write.csv(encoded_dataset, encoded_path, row.names = FALSE, na = "")
 utils::write.csv(manifest, manifest_path, row.names = FALSE, na = "")
 

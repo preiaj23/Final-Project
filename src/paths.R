@@ -1,3 +1,8 @@
+# Shared path helpers used by the project scripts so every script writes to the
+# same data, model, metric, and split locations.
+
+# Resolve the current script location when called with Rscript; fall back to the
+# working directory for interactive sessions.
 get_script_path <- function() {
   file_arg <- "--file="
   args <- commandArgs(trailingOnly = FALSE)
@@ -10,10 +15,14 @@ get_script_path <- function() {
   normalizePath(getwd(), mustWork = TRUE)
 }
 
+# Treat the parent directory of `src/` or `scripts/` as the project root.
 get_project_root <- function(script_path = get_script_path()) {
   normalizePath(file.path(dirname(script_path), ".."), mustWork = TRUE)
 }
 
+# Build a named list of all input and output paths used across the workflow.
+# The Data/data check lets the project work on case-sensitive or case-insensitive
+# file systems without changing downstream script code.
 build_project_paths <- function(project_root = get_project_root()) {
   data_dir_candidates <- c(file.path(project_root, "Data"), file.path(project_root, "data"))
   existing_data_dirs <- data_dir_candidates[file.exists(data_dir_candidates)]
@@ -51,6 +60,8 @@ build_project_paths <- function(project_root = get_project_root()) {
   )
 }
 
+# Create the directory tree expected by the merge, clean, train, and evaluation
+# scripts before they attempt to write files.
 ensure_project_dirs <- function(paths) {
   dir.create(paths$data_dir, recursive = TRUE, showWarnings = FALSE)
   dir.create(paths$cleaned_dir, recursive = TRUE, showWarnings = FALSE)

@@ -55,13 +55,24 @@ As a result, the only columns in `merged_encoded_dataset.csv` that are *not* 0/1
 - `high_cardinality_passthrough` columns (numeric columns with more than 20 unique values, including some weights and other high-uniqueness numeric variables)
 
 ## Modeling Script
-When deciding which functions to use, we used the following tests. Our intercept only was used as a baseline and random forest used as a baseline for xgboost. We wanted to use xgboost because of what we found during homework 3. We had to tune xgboost to get it to preform better than the piecewise polynomial. We used the piecewise polynomial as a point of comparison. 
+When deciding which models to use, we wanted the pipeline to compare methods with different levels of complexity instead of only trying one flexible model. Medical spending is very skewed, has many zero or low-spending observations, and likely has nonlinear relationships with demographics, health status, insurance, and utilization history. Because of that, we chose four models that each answer a different question about the prediction problem:
 
 
 - intercept-only baseline
 - random forest- used as a baseline for xgboost
-- xgboost - needed to be tunned on the cluster in order to preform better than piecewise polynomial 
+- xgboost - needed to be tuned on the cluster in order to preform better than piecewise polynomial 
 - piecewise polynomial smoothing-spline model with forward selection and 5-fold CV - used as out of box function
+
+The intercept-only model is the simplest possible benchmark because it predicts the same average spending level for every person. We included it so that every other model had to prove that the predictors were actually adding value. If a more complicated model could not beat the intercept-only model, that would mean the extra complexity was not useful.
+
+The random forest model was included as a tree-based baseline. It can automatically capture nonlinear relationships and interactions without requiring us to manually specify them. This made it a good middle step between the intercept-only model and XGBoost. Random forest also helped us check whether tree-based methods were a good fit for this data before relying on the more heavily tuned boosted-tree model.
+
+We chose XGBoost because it is usually strong for tabular prediction problems and because our earlier work in Homework 3 suggested that boosted trees could perform well on this type of data. XGBoost builds trees sequentially, where each new tree tries to correct errors from the earlier trees. That makes it more flexible than a random forest, but also more sensitive to hyperparameters. We did not want to assume XGBoost would be best automatically, so we compared it against the other models and tuned it carefully.
+
+The piecewise polynomial smoothing-spline model was included as a different kind of flexible nonlinear model. Unlike random forest and XGBoost, it represents nonlinear relationships through smooth curves. This gave us a useful comparison point: if the spline model performed better, that would suggest the spending relationships were better captured by smooth continuous patterns than by tree splits. In our results, the piecewise model was strong enough that XGBoost only became better after tuning, which is why the tuning step mattered.
+
+
+We one-hot encoded categorical variables so models could use survey-code variables without treating categories as if they had a true numeric order. We also saved the feature lists in the model bundle so future test data could be aligned to the exact same columns as the training data. This was important because a prediction pipeline has to be repeatable, not just accurate on one run.
 
 The script uses an 80/20 in-sample train-test split, clips negative predictions to zero for all models, and ranks models by RMSLE. It reads shared paths from `src/paths.R`, installs modeling dependencies from `src/download_packages.R`, and defensively one-hot encodes any remaining categorical variables that have 20 or fewer categories.
 
@@ -76,11 +87,13 @@ Rscript scripts/train_models.R cluster
 ```
 
 XGBoost tuning behavior (latest):
-Below is a list of what we did to tune xgboost in order to get it to preform better than piecewise function
+Below is a list of what we did to tune xgboost in order to get it to preform better than piecewise function. We used cross-validation instead of choosing hyperparameters from one split because one train/test split can be noisy, especially with skewed spending outcomes. Cross-validation gives a more stable estimate of how each parameter setting performs across different subsets of the training data.
 
 - Hyperparameter configs are ranked by cross-validated RMSLE (with RMSE as tie-breaker).
 - Within-fold early stopping is driven by an RMSLE custom metric.
 - Final refit rounds are selected by a holdout RMSLE early-stopping pass, then the final model is fit on the full XGBoost training matrix for that selected number of rounds.
+
+The local and cluster profiles were created because XGBoost tuning has a real cost. The local profile lets us test the pipeline quickly on a normal computer with fewer features, fewer parameter combinations, and fewer folds. The cluster profile uses more features, more parameter combinations, more folds, and more threads because it has more computing power available. This allowed us to search more thoroughly without making every local run take hours. The final tuning strategy reflects that tradeoff: quick enough to debug locally, but broad enough on the cluster to give XGBoost a fair chance against the spline model.
 
 Run it with:
 

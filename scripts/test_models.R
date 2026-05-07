@@ -1,5 +1,10 @@
 #!/usr/bin/env Rscript
 
+# Re-score the saved in-sample test split with every trained model and write
+# comparable error metrics plus the best-model pointer.
+
+# Resolve this script's path so project-relative paths work from any launch
+# directory.
 get_script_path <- function() {
   file_arg <- "--file="
   args <- commandArgs(trailingOnly = FALSE)
@@ -12,6 +17,8 @@ get_script_path <- function() {
   normalizePath(getwd(), mustWork = TRUE)
 }
 
+# Convert factors and numeric-looking strings into numeric vectors before metric
+# calculation or model scoring.
 coerce_numeric <- function(x) {
   if (is.factor(x)) {
     x <- as.character(x)
@@ -22,15 +29,19 @@ coerce_numeric <- function(x) {
   x
 }
 
+# Keep spending predictions in the valid non-negative range.
 clip_nonnegative <- function(pred) {
   pmax(pred, 0)
 }
 
+# Root mean squared log error is used to rank models because spending is highly
+# skewed.
 rmsle <- function(actual, pred) {
   pred <- clip_nonnegative(pred)
   sqrt(mean((log1p(pred) - log1p(actual))^2))
 }
 
+# Standard error metrics are reported alongside RMSLE for interpretation.
 rmse <- function(actual, pred) {
   pred <- clip_nonnegative(pred)
   sqrt(mean((actual - pred)^2))
@@ -46,6 +57,8 @@ mae <- function(actual, pred) {
   mean(abs(actual - pred))
 }
 
+# Recreate each model's numeric feature frame using the medians learned during
+# training.
 prepare_numeric_frame <- function(df, columns, medians) {
   out <- data.frame(row.names = seq_len(nrow(df)))
   for (nm in columns) {
@@ -63,6 +76,7 @@ prepare_numeric_frame <- function(df, columns, medians) {
   out
 }
 
+# Package all metrics for one model into a single-row data frame.
 compute_metrics <- function(actual, pred) {
   data.frame(
     rmsle = rmsle(actual, pred),
@@ -100,6 +114,8 @@ bundle <- readRDS(paths$model_bundle)
 test_df <- utils::read.csv(paths$in_sample_test_data, check.names = FALSE, stringsAsFactors = FALSE)
 target_name <- bundle$metadata$target_name
 
+# Validate that the saved test split still contains the target needed for
+# scoring.
 if (!target_name %in% names(test_df)) {
   stop(sprintf("Target column %s not found in in-sample test data.", target_name), call. = FALSE)
 }
@@ -109,6 +125,7 @@ if (any(!is.finite(actual))) {
   stop("In-sample test target contains non-finite values.", call. = FALSE)
 }
 
+# Generate predictions from each saved model family using its training artifacts.
 pred_intercept <- clip_nonnegative(stats::predict(bundle$models$intercept, newdata = test_df))
 
 rf_features <- bundle$artifacts$random_forest$features
@@ -138,6 +155,7 @@ spline_formula <- stats::as.formula(sprintf("%s ~ %s", target_name, spline_formu
 spline_newdata <- cbind(spline_test, setNames(data.frame(actual), target_name))
 pred_spline <- clip_nonnegative(stats::predict(bundle$models$piecewise_spline, newdata = spline_newdata))
 
+# Save row-level predictions for residual inspection.
 predictions <- data.frame(
   actual = actual,
   pred_intercept = pred_intercept,
@@ -147,6 +165,7 @@ predictions <- data.frame(
   stringsAsFactors = FALSE
 )
 
+# Rank all model families by RMSLE and write the full metric table.
 metrics <- rbind(
   cbind(model = "intercept", compute_metrics(actual, pred_intercept)),
   cbind(model = "random_forest", compute_metrics(actual, pred_rf)),
@@ -170,6 +189,7 @@ best_model_file <- switch(
   bundle$model_paths$intercept
 )
 
+# Later evaluation scripts read this pointer to know which saved model won.
 writeLines(best_model_file, con = paths$best_model_pointer, sep = "\n")
 
 message("Model testing complete.")

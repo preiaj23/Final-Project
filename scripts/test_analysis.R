@@ -21,6 +21,8 @@
 # - If preprocessing differs between train and test, RMSE will look worse until
 #   the test file uses identical cleaning and encoding as training.
 
+# Resolve this script's path so project-relative paths work from any launch
+# directory.
 get_script_path <- function() {
   file_arg <- "--file="
   args <- commandArgs(trailingOnly = FALSE)
@@ -31,14 +33,17 @@ get_script_path <- function() {
   normalizePath(getwd(), mustWork = TRUE)
 }
 
+# Convert factors and numeric-looking strings into numeric vectors for scoring.
 coerce_numeric <- function(x) {
   if (is.factor(x)) x <- as.character(x)
   if (is.character(x)) suppressWarnings(x <- as.numeric(x))
   x
 }
 
+# Keep spending predictions within the valid non-negative range.
 clip_nonnegative <- function(pred) pmax(pred, 0)
 
+# Metrics printed for the provided holdout file.
 rmse <- function(actual, pred) {
   pred <- clip_nonnegative(pred)
   sqrt(mean((actual - pred)^2))
@@ -49,6 +54,8 @@ rmsle <- function(actual, pred) {
   sqrt(mean((log1p(pred) - log1p(actual))^2))
 }
 
+# Rebuild the saved model feature frames with the same median imputation used in
+# training.
 prepare_numeric_frame <- function(df, columns, medians) {
   out <- data.frame(row.names = seq_len(nrow(df)))
   for (nm in columns) {
@@ -73,6 +80,8 @@ paths <- build_project_paths(project_root)
 ensure_project_dirs(paths)
 bootstrap_model_packages(project_root)
 
+# First argument optionally supplies a holdout file; the second argument can limit
+# evaluation to XGBoost when only XGBoost features are available.
 args <- commandArgs(trailingOnly = TRUE)
 xgboost_only <- length(args) >= 2L && tolower(trimws(args[[2]])) == "xgboost"
 data_path <- if (length(args) >= 1L) {
@@ -91,6 +100,8 @@ if (!file.exists(data_path)) {
 bundle <- readRDS(paths$model_bundle)
 target_name <- bundle$metadata$target_name
 
+# Load the requested CSV or Excel file and normalize column prefixes to match the
+# training feature names.
 if (grepl("\\.xlsx$|\\.xls$", data_path, ignore.case = TRUE)) {
   suppressPackageStartupMessages(library(readxl))
   test_df <- as.data.frame(readxl::read_excel(data_path), stringsAsFactors = FALSE)
@@ -111,6 +122,8 @@ if (!any(ok)) {
 test_df <- test_df[ok, , drop = FALSE]
 actual <- actual[ok]
 
+# Check that the holdout data has every feature required by the selected scoring
+# mode before running model predictions.
 need_cols <- if (xgboost_only) {
   unique(c(target_name, bundle$artifacts$xgboost$features))
 } else {
@@ -139,6 +152,7 @@ if (length(missing) > 0) {
   )
 }
 
+# XGBoost is always scored; the other model families are scored only in full mode.
 xgb_features <- bundle$artifacts$xgboost$features
 xgb_medians <- bundle$artifacts$xgboost$medians
 xgb_test <- prepare_numeric_frame(test_df, xgb_features, xgb_medians)
@@ -146,6 +160,7 @@ dtest <- xgboost::xgb.DMatrix(data = as.matrix(xgb_test))
 pred_xgb <- clip_nonnegative(stats::predict(bundle$models$xgboost, newdata = dtest))
 
 if (xgboost_only) {
+  # In XGBoost-only mode, return a one-row metric table.
   metrics <- data.frame(
     model = "xgboost",
     rmse = rmse(actual, pred_xgb),
@@ -154,6 +169,7 @@ if (xgboost_only) {
   )
   metrics$rank_rmse <- 1L
 } else {
+  # In full mode, rebuild the feature inputs for all saved models and rank by RMSE.
   pred_intercept <- clip_nonnegative(stats::predict(bundle$models$intercept, newdata = test_df))
 
   rf_features <- bundle$artifacts$random_forest$features

@@ -1,3 +1,7 @@
+# Package setup helpers for scripts that depend on modeling libraries.
+
+# Install any missing CRAN packages into the project-local library and prepend
+# that library to `.libPaths()` for the current R session.
 bootstrap_packages <- function(package_names, lib_path) {
   dir.create(lib_path, recursive = TRUE, showWarnings = FALSE)
   .libPaths(c(lib_path, .libPaths()))
@@ -21,6 +25,7 @@ bootstrap_packages <- function(package_names, lib_path) {
   }
 }
 
+# Check for a package that should already ship with R or be installed manually.
 ensure_package <- function(package_name) {
   if (!requireNamespace(package_name, quietly = TRUE)) {
     stop(
@@ -34,6 +39,8 @@ ensure_package <- function(package_name) {
   }
 }
 
+# Ensure the modeling stack is available, adding optional packages for scripts
+# that need extra readers such as `readxl`.
 bootstrap_model_packages <- function(project_root, extra_packages = character()) {
   local_lib <- file.path(project_root, ".Rlibs")
   required <- unique(c("randomForest", "xgboost", extra_packages))
@@ -42,6 +49,8 @@ bootstrap_model_packages <- function(project_root, extra_packages = character())
   invisible(local_lib)
 }
 
+# Allow this helper file to be run directly as a setup script, while keeping the
+# functions source-able by the modeling scripts.
 if (sys.nframe() == 0) {
   file_arg <- "--file="
   args <- commandArgs(trailingOnly = FALSE)

@@ -1,5 +1,10 @@
 #!/usr/bin/env Rscript
 
+# Train and compare several spending prediction models, then save metrics,
+# predictions, individual model files, and one bundle used by later scripts.
+
+# Resolve this script's path so project-relative paths work from any launch
+# directory.
 get_script_path <- function() {
   file_arg <- "--file="
   args <- commandArgs(trailingOnly = FALSE)
@@ -12,6 +17,7 @@ get_script_path <- function() {
   normalizePath(getwd(), mustWork = TRUE)
 }
 
+# Convert factors and numeric-looking strings into numeric vectors for modeling.
 coerce_numeric <- function(x) {
   if (is.factor(x)) {
     x <- as.character(x)
@@ -24,6 +30,8 @@ coerce_numeric <- function(x) {
   x
 }
 
+# Replace missing values with the median so models that cannot handle NA values
+# receive complete numeric inputs.
 impute_with_median <- function(x, fallback = 0) {
   x <- coerce_numeric(x)
   med <- suppressWarnings(stats::median(x, na.rm = TRUE))
@@ -36,6 +44,8 @@ impute_with_median <- function(x, fallback = 0) {
   x
 }
 
+# Build a numeric matrix for XGBoost and store the medians used for imputation so
+# future data can be prepared identically.
 build_feature_matrix <- function(df, columns, medians = NULL) {
   if (length(columns) == 0) {
     return(list(matrix = matrix(numeric(), nrow = nrow(df), ncol = 0), medians = numeric()))
@@ -68,15 +78,20 @@ build_feature_matrix <- function(df, columns, medians = NULL) {
   list(matrix = out, medians = medians)
 }
 
+# Spending predictions are constrained to non-negative values before computing
+# error metrics.
 clip_nonnegative <- function(pred) {
   pmax(pred, 0)
 }
 
+# Root mean squared log error emphasizes proportional error and is the primary
+# comparison metric for skewed spending outcomes.
 rmsle <- function(actual, pred) {
   pred <- clip_nonnegative(pred)
   sqrt(mean((log1p(pred) - log1p(actual))^2))
 }
 
+# Custom XGBoost evaluation callback so early stopping can monitor RMSLE.
 feval_rmsle <- function(preds, dtrain) {
   labels <- xgboost::getinfo(dtrain, "label")
   pred <- clip_nonnegative(as.numeric(preds))
@@ -84,10 +99,13 @@ feval_rmsle <- function(preds, dtrain) {
   list(metric = "rmsle", value = err)
 }
 
+# Raw RMSE is tracked alongside RMSLE for interpretability in dollar units.
 rmse_raw <- function(actual, pred) {
   sqrt(mean((actual - pred)^2))
 }
 
+# Extract the effective number of boosting rounds from different xgboost object
+# fields, depending on package version and training path.
 xgb_best_tree_count <- function(fit) {
   es <- attr(fit, "early_stop")
   if (!is.null(es) && !is.null(es$best_iteration)) {
@@ -117,6 +135,8 @@ xgb_best_tree_count <- function(fit) {
   1L
 }
 
+# Tune XGBoost by running cross-validation over sampled hyperparameter
+# configurations, checkpointing progress so long tuning runs can be resumed.
 tune_xgboost_rmse <- function(
   x_train,
   y_train,
@@ -245,6 +265,8 @@ tune_xgboost_rmse <- function(
   cbind(param_grid, results, row.names = NULL)
 }
 
+# Pick the final number of boosting rounds with a holdout split before refitting
+# XGBoost on the full tuning sample.
 xgb_refit_rounds_from_holdout_rmsle <- function(
   x_mat,
   y,
@@ -288,6 +310,8 @@ xgb_refit_rounds_from_holdout_rmsle <- function(
   bi
 }
 
+# Tune random forest by validating several mtry values and keeping the one with
+# the lowest holdout RMSE.
 tune_random_forest_rmse <- function(
   x_train,
   y_train,
@@ -319,6 +343,7 @@ tune_random_forest_rmse <- function(
   list(val_rmse = best_rmse, mtry = best_mtry)
 }
 
+# Make category levels safe to use as one-hot encoded column names.
 sanitize_level <- function(level) {
   out <- gsub("[^A-Za-z0-9]+", "_", level)
   out <- gsub("^_+|_+$", "", out)
@@ -328,6 +353,8 @@ sanitize_level <- function(level) {
   out
 }
 
+# Convert low-cardinality character, factor, and logical predictors into one-hot
+# columns while leaving high-cardinality fields as numeric factor codes.
 enforce_low_cardinality_ohe <- function(df, exclude_columns, max_levels = 20L) {
   transformed <- df
   cols <- setdiff(names(transformed), exclude_columns)
@@ -366,6 +393,8 @@ enforce_low_cardinality_ohe <- function(df, exclude_columns, max_levels = 20L) {
   list(data = transformed, encoded_sources = encoded_sources)
 }
 
+# Build a complete numeric data frame for models that accept data frames rather
+# than matrices, reusing training medians when preparing test data.
 prepare_numeric_frame <- function(df, columns, medians = NULL) {
   out <- data.frame(row.names = seq_len(nrow(df)))
   if (is.null(medians)) {
@@ -389,6 +418,8 @@ prepare_numeric_frame <- function(df, columns, medians = NULL) {
   list(data = out, medians = medians)
 }
 
+# Estimate spline model quality with K-fold cross-validation for a given feature
+# set and spline degree.
 cv_rmsle <- function(df, target_name, feature_names, degree, n_folds = 5L, seed = 2026L) {
   if (length(feature_names) == 0) {
     return(Inf)
@@ -422,6 +453,8 @@ cv_rmsle <- function(df, target_name, feature_names, degree, n_folds = 5L, seed 
   mean(fold_scores)
 }
 
+# Greedily choose spline predictors and degree by adding only features that
+# improve cross-validated RMSLE.
 forward_select_spline <- function(train_df, target_name, candidates, max_features = 8L, n_folds = 5L) {
   selected <- character()
   remaining <- candidates
@@ -461,6 +494,8 @@ project_root <- normalizePath(file.path(dirname(script_path), ".."), mustWork = 
 source(file.path(project_root, "src", "paths.R"))
 source(file.path(project_root, "src", "download_packages.R"))
 
+# The cluster profile uses more features, tuning configurations, folds, and CPU
+# threads for a slower but broader XGBoost search.
 cli_args <- commandArgs(trailingOnly = TRUE)
 profile_mode <- if (length(cli_args) >= 1L) tolower(trimws(cli_args[[1L]])) else "local"
 if (!profile_mode %in% c("local", "cluster")) {
@@ -491,6 +526,8 @@ paths <- build_project_paths(project_root)
 ensure_project_dirs(paths)
 bootstrap_model_packages(project_root)
 
+# Prefer the encoded dataset produced by clean_datasets.R, but fall back to the
+# standardized merged dataset if encoding has not been generated.
 input_path <- paths$merged_encoded_dataset
 if (!file.exists(input_path)) {
   input_path <- paths$merged_standardized_dataset
@@ -515,6 +552,7 @@ if (!target_name %in% names(dataset)) {
   )
 }
 
+# Keep only rows with usable non-negative target values for model training.
 dataset[[target_name]] <- coerce_numeric(dataset[[target_name]])
 dataset <- dataset[is.finite(dataset[[target_name]]) & dataset[[target_name]] >= 0, , drop = FALSE]
 
@@ -531,6 +569,7 @@ exclude_columns <- c(
   "DATASET_YEAR"
 )
 
+# Apply one-hot encoding to any remaining low-cardinality non-numeric predictors.
 ohe_result <- enforce_low_cardinality_ohe(
   df = dataset,
   exclude_columns = exclude_columns,
@@ -540,6 +579,7 @@ dataset <- ohe_result$data
 
 candidate_columns <- setdiff(names(dataset), exclude_columns)
 
+# Candidate predictors must vary and cannot be almost entirely missing.
 candidate_numeric <- candidate_columns[vapply(dataset[candidate_columns], function(x) {
   x_num <- coerce_numeric(x)
   stats::sd(x_num, na.rm = TRUE) > 0 && mean(is.na(x_num)) < 0.95
@@ -549,6 +589,7 @@ if (length(candidate_numeric) < 10) {
   stop("Insufficient numeric candidate predictors after preprocessing.", call. = FALSE)
 }
 
+# Create a reproducible 80/20 train-test split for comparing all model families.
 set.seed(2026)
 train_idx <- sample.int(nrow(dataset), size = floor(0.8 * nrow(dataset)))
 train_df <- dataset[train_idx, , drop = FALSE]
@@ -663,6 +704,7 @@ xgb_param_grid <- xgb_param_space[sample.int(nrow(xgb_param_space), n_xgb_tune),
 xgb_param_grid$config_id <- seq_len(nrow(xgb_param_grid))
 rownames(xgb_param_grid) <- NULL
 
+# Store both profile-specific and legacy tuning result files for easier review.
 xgb_tune_path <- file.path(paths$metrics_dir, sprintf("xgboost_hyperparameter_tune_%s.csv", profile_mode))
 legacy_xgb_tune_path <- file.path(paths$metrics_dir, "xgboost_hyperparameter_tune.csv")
 xgb_tune_results <- tune_xgboost_rmse(
@@ -767,6 +809,8 @@ spline_fit <- stats::lm(spline_formula, data = spline_train)
 pred_spline <- clip_nonnegative(stats::predict(spline_fit, newdata = spline_test))
 rmsle_spline <- rmsle(y_test, pred_spline)
 
+# Save a compact copy of the test split with only columns needed to reproduce
+# model predictions later.
 compact_test_columns <- unique(c(target_name, top_features, xgb_features, spline_select$selected))
 compact_test_columns <- compact_test_columns[compact_test_columns %in% names(test_df)]
 
@@ -783,6 +827,7 @@ utils::write.csv(
   na = ""
 )
 
+# Compare models on the shared test set and rank them by RMSLE.
 comparison <- data.frame(
   model = c("intercept", "random_forest", "xgboost", "piecewise_polynomial_spline"),
   rmsle = c(rmsle_intercept, rmsle_rf, rmsle_xgb, rmsle_spline),
@@ -798,6 +843,7 @@ comparison <- comparison[order(comparison$rmsle), , drop = FALSE]
 comparison$rank <- seq_len(nrow(comparison))
 comparison <- comparison[, c("rank", "model", "rmsle", "rmse")]
 
+# Store row-level predictions so model errors can be inspected after training.
 predictions <- data.frame(
   row_index = as.integer(rownames(test_df)),
   actual = y_test,
@@ -831,11 +877,14 @@ rf_model_path <- file.path(paths$models_dir, "random_forest_model.rds")
 xgb_model_path <- file.path(paths$models_dir, "xgboost_model.rds")
 spline_model_path <- file.path(paths$models_dir, "piecewise_spline_model.rds")
 
+# Save individual model objects for direct loading.
 saveRDS(intercept_fit, intercept_model_path)
 saveRDS(rf_fit, rf_model_path)
 saveRDS(xgb_fit, xgb_model_path)
 saveRDS(spline_fit, spline_model_path)
 
+# Bundle models together with preprocessing artifacts so later scripts can score
+# future data using the exact training feature lists and imputation medians.
 bundle <- list(
   metadata = list(
     target_name = target_name,

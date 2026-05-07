@@ -13,6 +13,8 @@
 # If TOTEXP is present, prints RMSE and RMSLE on rows with valid targets and
 # adds an `actual` column to the output. If TOTEXP is absent, writes predictions only.
 
+# Resolve this script's path so project-relative paths work from any launch
+# directory.
 get_script_path <- function() {
   file_arg <- "--file="
   args <- commandArgs(trailingOnly = FALSE)
@@ -23,14 +25,17 @@ get_script_path <- function() {
   normalizePath(getwd(), mustWork = TRUE)
 }
 
+# Convert factors and numeric-looking strings into numeric vectors for XGBoost.
 coerce_numeric <- function(x) {
   if (is.factor(x)) x <- as.character(x)
   if (is.character(x)) suppressWarnings(x <- as.numeric(x))
   x
 }
 
+# Keep spending predictions within the valid non-negative range.
 clip_nonnegative <- function(pred) pmax(pred, 0)
 
+# Optional target metrics are computed when the input file contains TOTEXP.
 rmse <- function(actual, pred) {
   pred <- clip_nonnegative(pred)
   sqrt(mean((actual - pred)^2))
@@ -41,6 +46,8 @@ rmsle <- function(actual, pred) {
   sqrt(mean((log1p(pred) - log1p(actual))^2))
 }
 
+# Rebuild the exact numeric feature frame XGBoost saw during training, imputing
+# missing values with saved medians.
 prepare_numeric_frame <- function(df, columns, medians) {
   out <- data.frame(row.names = seq_len(nrow(df)))
   for (nm in columns) {
@@ -74,6 +81,8 @@ if (length(args) < 1L) {
 }
 
 data_path <- normalizePath(args[[1]], mustWork = TRUE)
+# Default prediction output lives with the metrics unless the caller supplies a
+# second path.
 out_path <- if (length(args) >= 2L) {
   normalizePath(args[[2]], mustWork = FALSE)
 } else {
@@ -87,6 +96,8 @@ if (!file.exists(paths$model_bundle)) {
 bundle <- readRDS(paths$model_bundle)
 target_name <- bundle$metadata$target_name
 
+# Load either Excel or CSV input, preserving column names so they can be matched
+# to the training feature names.
 if (grepl("\\.xlsx$|\\.xls$", data_path, ignore.case = TRUE)) {
   suppressPackageStartupMessages(library(readxl))
   new_df <- as.data.frame(readxl::read_excel(data_path), stringsAsFactors = FALSE)
@@ -95,6 +106,7 @@ if (grepl("\\.xlsx$|\\.xls$", data_path, ignore.case = TRUE)) {
 }
 names(new_df) <- sub("^[^.]+\\.", "", names(new_df))
 
+# Verify the input already has the encoded XGBoost feature columns.
 xgb_features <- bundle$artifacts$xgboost$features
 xgb_medians <- bundle$artifacts$xgboost$medians
 missing <- setdiff(xgb_features, names(new_df))
@@ -113,6 +125,7 @@ if (length(missing) > 0) {
   )
 }
 
+# Score the rows with the saved XGBoost model.
 xgb_frame <- prepare_numeric_frame(new_df, xgb_features, xgb_medians)
 dmat <- xgboost::xgb.DMatrix(data = as.matrix(xgb_frame))
 pred <- clip_nonnegative(stats::predict(bundle$models$xgboost, newdata = dmat))
@@ -123,6 +136,8 @@ out <- data.frame(
   stringsAsFactors = FALSE
 )
 
+# If a target column is present, include it in the output and print evaluation
+# metrics for valid rows.
 has_target <- target_name %in% names(new_df)
 if (has_target) {
   actual <- coerce_numeric(new_df[[target_name]])

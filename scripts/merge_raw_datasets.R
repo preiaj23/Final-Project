@@ -1,5 +1,9 @@
 #!/usr/bin/env Rscript
 
+# Merge raw annual MEPS Excel files into one standardized CSV with audit files
+# that document renamed columns, duplicate columns, and row counts by source.
+
+# Resolve this script's path so relative project paths work from any directory.
 get_script_path <- function() {
   file_arg <- "--file="
   args <- commandArgs(trailingOnly = FALSE)
@@ -12,6 +16,8 @@ get_script_path <- function() {
   normalizePath(getwd(), mustWork = TRUE)
 }
 
+# Stop early with an actionable message if a required input-reading package is
+# not available.
 ensure_package <- function(package_name) {
   if (!requireNamespace(package_name, quietly = TRUE)) {
     stop(
@@ -25,6 +31,9 @@ ensure_package <- function(package_name) {
   }
 }
 
+# Normalize column names across years by uppercasing, applying known manual
+# renames, and removing year suffixes that would otherwise make the same concept
+# look like different variables.
 standardize_name <- function(name, manual_map) {
   standardized <- toupper(trimws(name))
 
@@ -48,6 +57,8 @@ standardize_name <- function(name, manual_map) {
   standardized
 }
 
+# When standardization creates duplicate column names, combine those columns by
+# filling missing values from later duplicates and record conflicts for review.
 coalesce_duplicate_columns <- function(data, source_file) {
   duplicate_names <- unique(names(data)[duplicated(names(data))])
   if (length(duplicate_names) == 0) {
@@ -109,6 +120,8 @@ coalesce_duplicate_columns <- function(data, source_file) {
   )
 }
 
+# Add missing columns to each annual dataset so the final row-bind has a common
+# schema across all survey years.
 align_columns <- function(data_list) {
   all_columns <- unique(unlist(lapply(data_list, names), use.names = FALSE))
 
@@ -135,12 +148,15 @@ output_dir <- paths$cleaned_dir
 
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
+# List the expected raw files and the survey year each file represents.
 file_specs <- data.frame(
   file_name = c("h216.xlsx", "H224.xlsx", "h233.xlsx", "h243.xlsx", "h251.xlsx"),
   data_year = c(2019L, 2020L, 2021L, 2022L, 2023L),
   stringsAsFactors = FALSE
 )
 
+# Known one-off naming differences that need to be fixed before automatic
+# year-suffix standardization.
 manual_rename_map <- c(
   PROVSEX42 = "GENDRP42",
   TRIST19X = "TRI19X",
@@ -152,6 +168,8 @@ rename_audits <- list()
 duplicate_audits <- list()
 row_count_summary <- list()
 
+# Read each annual workbook, standardize its column names, attach source metadata,
+# and save audit information needed to inspect the merge.
 for (i in seq_len(nrow(file_specs))) {
   spec <- file_specs[i, ]
   input_path <- file.path(raw_dir, spec$file_name)
@@ -218,9 +236,12 @@ for (i in seq_len(nrow(file_specs))) {
   datasets[[length(datasets) + 1]] <- dataset
 }
 
+# Align all annual files to the same columns and stack them into the final merged
+# dataset.
 aligned_datasets <- align_columns(datasets)
 merged_dataset <- do.call(rbind, aligned_datasets)
 
+# Collapse the per-file audit lists into CSV-ready data frames.
 row_count_summary <- do.call(rbind, row_count_summary)
 rename_audit <- do.call(rbind, rename_audits)
 duplicate_audit <- do.call(rbind, duplicate_audits)
@@ -231,6 +252,7 @@ row_count_path <- file.path(output_dir, "merge_row_counts.csv")
 rename_audit_path <- file.path(output_dir, "rename_audit.csv")
 duplicate_audit_path <- file.path(output_dir, "duplicate_name_audit.csv")
 
+# Write the merged dataset and audit outputs used by later cleaning steps.
 utils::write.csv(merged_dataset, merged_path, row.names = FALSE, na = "")
 utils::write.csv(row_count_summary, row_count_path, row.names = FALSE, na = "")
 utils::write.csv(rename_audit, rename_audit_path, row.names = FALSE, na = "")
