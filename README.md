@@ -1,8 +1,10 @@
 # Final-Project
 
+To run this project, drag the test.xlsx into the Data/future folder and type make evaluate into the terminal 
+
 ## Data Merge Script
 
-Use `scripts/merge_raw_datasets.R` to read the Excel files in `data/raw`, standardize inconsistent variable names, and combine them into one merged dataset without modifying the raw files.
+Use `scripts/merge_raw_datasets.R` to read the Excel files in `data/raw`. We went through and made sure the variable names were the same across both data sets, and standardized inconsistent variable names. The varaiable names were combined into one merged dataset without modifying the raw files.
 
 Run it with:
 
@@ -53,13 +55,13 @@ As a result, the only columns in `merged_encoded_dataset.csv` that are *not* 0/1
 - `high_cardinality_passthrough` columns (numeric columns with more than 20 unique values, including some weights and other high-uniqueness numeric variables)
 
 ## Modeling Script
+When deciding which functions to use, we used the following tests. Our intercept only was used as a baseline and random forest used as a baseline for xgboost. We wanted to use xgboost because of what we found during homework 3. We had to tune xgboost to get it to preform better than the piecewise polynomial. We used the piecewise polynomial as a point of comparison. 
 
-Use `scripts/train_models.R` after cleaning to train and compare:
 
 - intercept-only baseline
-- random forest
-- xgboost
-- piecewise polynomial smoothing-spline model with forward selection and 5-fold CV
+- random forest- used as a baseline for xgboost
+- xgboost - needed to be tunned on the cluster in order to preform better than piecewise polynomial 
+- piecewise polynomial smoothing-spline model with forward selection and 5-fold CV - used as out of box function
 
 The script uses an 80/20 in-sample train-test split, clips negative predictions to zero for all models, and ranks models by RMSLE. It reads shared paths from `src/paths.R`, installs modeling dependencies from `src/download_packages.R`, and defensively one-hot encodes any remaining categorical variables that have 20 or fewer categories.
 
@@ -74,6 +76,7 @@ Rscript scripts/train_models.R cluster
 ```
 
 XGBoost tuning behavior (latest):
+Below is a list of what we did to tune xgboost in order to get it to preform better than piecewise function
 
 - Hyperparameter configs are ranked by cross-validated RMSLE (with RMSE as tie-breaker).
 - Within-fold early stopping is driven by an RMSLE custom metric.
@@ -161,6 +164,8 @@ Latest local training result (`output/metrics/train_rmsle_comparison.csv`):
 - **xgboost**: RMSLE `2.8573975031` (best)
 - piecewise polynomial spline: RMSLE `2.9242136793`
 
+We choose xgboost as our final model because it had the lowest RMSLE after tuning, meaning it has the best preformance.
+
 Outputs are now split by purpose:
 
 - `output/models/`: model `.rds` files, `trained_model_bundle.rds`, and `best_model_path.txt`
@@ -183,281 +188,15 @@ After the most recent run of `clean_datasets.R`:
 
 The same list is saved under `data/cleaned/dropped_variables.csv` (one column: `variable`).
 
-### Dropped variable names (267)
-
-```
-DVTEXP
-DVTMCD
-DVTMCR
-DVTOFD
-DVTOSR
-DVTOT
-DVTOTH
-DVTPRV
-DVTPTR
-DVTSLF
-DVTSTL
-DVTTCH
-DVTTRI
-DVTVA
-DVTWCP
-ERDEXP
-ERDMCD
-ERDMCR
-ERDOFD
-ERDOSR
-ERDOTH
-ERDPRV
-ERDPTR
-ERDSLF
-ERDSTL
-ERDTCH
-ERDTRI
-ERDVA
-ERDWCP
-ERFEXP
-ERFMCD
-ERFMCR
-ERFOFD
-ERFOSR
-ERFOTH
-ERFPRV
-ERFPTR
-ERFSLF
-ERFSTL
-ERFTCH
-ERFTRI
-ERFVA
-ERFWCP
-ERTEXP
-ERTMCD
-ERTMCR
-ERTOFD
-ERTOSR
-ERTOT
-ERTOTH
-ERTPRV
-ERTPTR
-ERTSLF
-ERTSTL
-ERTTCH
-ERTTRI
-ERTVA
-ERTWCP
-HHAEXP
-HHAGD
-HHAMCD
-HHAMCR
-HHAOFD
-HHAOSR
-HHAOTH
-HHAPRV
-HHAPTR
-HHASLF
-HHASTL
-HHATCH
-HHATRI
-HHAVA
-HHAWCP
-HHINDD
-HHINFD
-HHNEXP
-HHNMCD
-HHNMCR
-HHNOFD
-HHNOSR
-HHNOTH
-HHNPRV
-HHNPTR
-HHNSLF
-HHNSTL
-HHNTCH
-HHNTRI
-HHNVA
-HHNWCP
-HHTOTD
-IPDEXP
-IPDIS
-IPDMCD
-IPDMCR
-IPDOFD
-IPDOSR
-IPDOTH
-IPDPRV
-IPDPTR
-IPDSLF
-IPDSTL
-IPDTCH
-IPDTRI
-IPDVA
-IPDWCP
-IPFEXP
-IPFMCD
-IPFMCR
-IPFOFD
-IPFOSR
-IPFOTH
-IPFPRV
-IPFPTR
-IPFSLF
-IPFSTL
-IPFTCH
-IPFTRI
-IPFVA
-IPFWCP
-IPNGTD
-IPTEXP
-IPTMCD
-IPTMCR
-IPTOFD
-IPTOSR
-IPTOTH
-IPTPRV
-IPTPTR
-IPTSLF
-IPTSTL
-IPTTCH
-IPTTRI
-IPTVA
-IPTWCP
-OBDEXP
-OBDMCD
-OBDMCR
-OBDOFD
-OBDOSR
-OBDOTH
-OBDPRV
-OBDPTR
-OBDRV
-OBDSLF
-OBDSTL
-OBDTCH
-OBDTRI
-OBDVA
-OBDWCP
-OBTOTV
-OBVEXP
-OBVMCD
-OBVMCR
-OBVOFD
-OBVOSR
-OBVOTH
-OBVPRV
-OBVPTR
-OBVSLF
-OBVSTL
-OBVTCH
-OBVTRI
-OBVVA
-OBVWCP
-OPDEXP
-OPDMCD
-OPDMCR
-OPDOFD
-OPDOSR
-OPDOTH
-OPDPRV
-OPDPTR
-OPDRV
-OPDSLF
-OPDSTL
-OPDTCH
-OPDTRI
-OPDVA
-OPDWCP
-OPFEXP
-OPFMCD
-OPFMCR
-OPFOFD
-OPFOSR
-OPFOTH
-OPFPRV
-OPFPTR
-OPFSLF
-OPFSTL
-OPFTCH
-OPFTRI
-OPFVA
-OPFWCP
-OPSEXP
-OPSMCD
-OPSMCR
-OPSOFD
-OPSOSR
-OPSOTH
-OPSPRV
-OPSPTR
-OPSSLF
-OPSSTL
-OPSTCH
-OPSTRI
-OPSVA
-OPSWCP
-OPTEXP
-OPTMCD
-OPTMCR
-OPTOFD
-OPTOSR
-OPTOTH
-OPTOTV
-OPTPRV
-OPTPTR
-OPTSLF
-OPTSTL
-OPTTCH
-OPTTRI
-OPTVA
-OPTWCP
-OPVEXP
-OPVMCD
-OPVMCR
-OPVOFD
-OPVOSR
-OPVOTH
-OPVPRV
-OPVPTR
-OPVSLF
-OPVSTL
-OPVTCH
-OPVTRI
-OPVVA
-OPVWCP
-PERWTF
-RXEXP
-RXMCD
-RXMCR
-RXOFD
-RXOSR
-RXOTH
-RXPRV
-RXPTR
-RXSLF
-RXSTL
-RXTOT
-RXTRI
-RXVA
-RXWCP
-TOTEXP
-TOTMCD
-TOTMCR
-TOTOFD
-TOTOSR
-TOTOTH
-TOTPRV
-TOTPTR
-TOTSLF
-TOTSTL
-TOTTCH
-TOTTRI
-TOTVA
-TOTWCP
-VARPSU
-VARSTR
-```
+## Dropped Varaibles 
+We dropped a total of 267 variable names. This list was provided to us by our professor. 
 
 Notes:
 
-- The raw Excel files in `data/raw` are left unchanged.
+- The raw Excel files in `data/raw` are not edited.
 - Variables that are clearly the same across years are standardized to a common name in the merge step.
 - Variables that appear to be genuinely new in later years are kept as separate columns until dropped by the cleaning rules above.
 - Row count is unchanged by cleaning (`126003` rows); only columns are removed and `DATASET_YEAR` is set.
+
+What was learned:
+xgboost needs a lot of tunning. It took us a total of 3 hours of tunning on the cluster. Piecewise can outpreform a tree when it is not tunned. Our intercept model did not outpreform any of the models. 
