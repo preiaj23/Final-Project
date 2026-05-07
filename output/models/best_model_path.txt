@@ -1,1 +1,1 @@
-/Users/sashaskinner/Final-Project/output/models/xgboost_model.rds
+output/models/xgboost_model.rds
